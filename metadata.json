@@ -1,0 +1,6 @@
+{
+  "name": "Cineaste Ledger",
+  "description": "Personal Letterboxd film archive, annual ranked list studio, and historically accurate Academy Awards ballot ledger from 1927 to the present.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
