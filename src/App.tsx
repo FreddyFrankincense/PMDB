@@ -19,6 +19,8 @@ import {
   BookOpen,
   UserCheck,
   TableProperties,
+  Monitor,
+  Download,
 } from 'lucide-react';
 import {
   CineasteArchiveState,
@@ -58,6 +60,8 @@ import { ComparisonView } from './components/ComparisonView';
 import { DataSourcesView } from './components/DataSourcesView';
 import { ChangesSummaryView } from './components/ChangesSummaryView';
 import { FilmGroupCohort } from './components/GroupHistogramPanel';
+import { DesktopExecutableModal } from './components/DesktopExecutableModal';
+import { usePWAInstall, useOnlineStatus } from './hooks/usePWAInstall';
 
 export type UnifiedNavTab =
   | 'catalog'
@@ -244,6 +248,11 @@ export default function App() {
   // Modals
   const [selectedFilmIdForModal, setSelectedFilmIdForModal] = useState<string | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showDesktopExecutableModal, setShowDesktopExecutableModal] = useState(false);
+
+  // PWA & Standalone Desktop Status
+  const { isInstallable, isInstalled, install: triggerPwaInstall } = usePWAInstall();
+  const isOnline = useOnlineStatus();
 
   // Quick Add Film Bar in Catalog
   const [showQuickAddDrawer, setShowQuickAddDrawer] = useState(false);
@@ -921,7 +930,27 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2.5">
+              {isInstallable && !isInstalled && (
+                <button
+                  type="button"
+                  onClick={triggerPwaInstall}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-[#9A7B1C] dark:bg-[#D4AF37] text-white dark:text-[#0C0C0E] hover:opacity-90 transition-opacity cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Install Desktop App</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setShowDesktopExecutableModal(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-[#9A7B1C]/60 dark:border-[#D4AF37]/60 bg-[#FBF9F5] dark:bg-[#18191E] text-[#9A7B1C] dark:text-[#D4AF37] hover:bg-[#9A7B1C]/10 dark:hover:bg-[#D4AF37]/10 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Monitor className="w-3.5 h-3.5" />
+                <span>Desktop Executable</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setShowQuickAddDrawer(!showQuickAddDrawer)}
@@ -1920,6 +1949,14 @@ export default function App() {
           <span aria-hidden="true">·</span>
           <button
             type="button"
+            onClick={() => setShowDesktopExecutableModal(true)}
+            className="hover:text-[#181615] dark:hover:text-[#F4F1EA] cursor-pointer font-medium text-[#9A7B1C] dark:text-[#D4AF37]"
+          >
+            Standalone Desktop Executable
+          </button>
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
             onClick={() => triggerBatchEnrich(true)}
             className="hover:text-[#181615] dark:hover:text-[#F4F1EA] cursor-pointer"
           >
@@ -1934,9 +1971,17 @@ export default function App() {
           film={activeModalFilm}
           lists={archive.lists}
           oscarStats={
-            oscarStatsByFilmId[activeModalFilm.id] || { nominations: [], wins: [] }
+            oscarStatsByFilmId[activeModalFilm.id] ||
+            personalOscarByTitleYear.get(
+              normalizeFilmMatchKey(activeModalFilm.title, activeModalFilm.year)
+            ) || { nominations: [], wins: [] }
           }
-          yearRank={yearRankByFilmId[activeModalFilm.id]}
+          yearRank={
+            yearRankByFilmId[activeModalFilm.id] ??
+            yearRankByTitleYear.get(
+              normalizeFilmMatchKey(activeModalFilm.title, activeModalFilm.year)
+            )
+          }
           profileEntry={activeModalProfileEntry}
           baselineEntry={activeModalBaselineEntry}
           onClose={() => setSelectedFilmIdForModal(null)}
@@ -1986,8 +2031,11 @@ export default function App() {
             setSelectedYear(year);
             setActiveTab('rankings');
           }}
-          onOpenInSpreadsheet={(entryId) => {
-            setSpreadsheetInspectedFilmId(entryId);
+          onOpenInSpreadsheet={(filmTitle, filmYear) => {
+            const matchedEntry =
+              activeModalProfileEntry ||
+              profileEntryByKey.get(normalizeFilmMatchKey(filmTitle, filmYear));
+            setSpreadsheetInspectedFilmId(matchedEntry?.id || activeModalFilm.id);
             setActiveTab('spreadsheet');
           }}
         />
@@ -2008,6 +2056,23 @@ export default function App() {
             updateUnifiedArchive(seed);
           }}
         />
+      )}
+
+      {/* Standalone Desktop Executable & System Diagnostics Studio Modal */}
+      {showDesktopExecutableModal && (
+        <DesktopExecutableModal
+          archive={archive}
+          profiles={profiles}
+          onClose={() => setShowDesktopExecutableModal(false)}
+        />
+      )}
+
+      {/* Offline Connectivity Banner */}
+      {!isOnline && (
+        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2 border border-amber-500/40 bg-[#141519]/95 px-3.5 py-2 text-xs font-mono-tabular text-amber-300 shadow-lg">
+          <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+          <span>Offline Desktop Mode — Local archive &amp; cached assets active</span>
+        </div>
       )}
     </div>
   );

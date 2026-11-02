@@ -1,5 +1,6 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
+import { createServer as createViteServer, build as buildVite } from 'vite';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
@@ -734,6 +735,111 @@ async function startServer() {
       films: parsedFilms,
       notice: `Parsed ${parsedFilms.length} film entries from raw RSS/HTML snippet.`,
     });
+  });
+
+  // Endpoint 5: Standalone Desktop Compiler Status & Build Packaging
+  app.get('/api/desktop/status', (_req, res) => {
+    const distDir = path.join(__dirname, 'dist');
+    const standalonePath = path.join(distDir, 'PMDB-Standalone-Desktop.html');
+    const hasStandalone = fs.existsSync(standalonePath);
+    const sizeBytes = hasStandalone ? fs.statSync(standalonePath).size : 0;
+    res.json({
+      ready: true,
+      hasCompiledStandalone: hasStandalone,
+      standaloneSizeBytes: sizeBytes,
+      standalonePath: '/dist/PMDB-Standalone-Desktop.html',
+      electronWrapperPresent: fs.existsSync(path.join(__dirname, 'electron-main.cjs')),
+    });
+  });
+
+  app.post('/api/desktop/build-standalone', async (req, res) => {
+    try {
+      const distAssetsDir = path.join(__dirname, 'dist', 'assets');
+      if (!fs.existsSync(distAssetsDir)) {
+        await buildVite({ logLevel: 'silent' });
+      }
+
+      const assetFiles = fs.existsSync(distAssetsDir) ? fs.readdirSync(distAssetsDir) : [];
+      const cssFiles = assetFiles.filter((f) => f.endsWith('.css'));
+      const jsFiles = assetFiles.filter((f) => f.endsWith('.js'));
+
+      let combinedCss = '';
+      for (const f of cssFiles) {
+        combinedCss += fs.readFileSync(path.join(distAssetsDir, f), 'utf-8') + '\n';
+      }
+
+      let combinedJs = '';
+      for (const f of jsFiles) {
+        combinedJs += fs.readFileSync(path.join(distAssetsDir, f), 'utf-8') + '\n';
+      }
+
+      // Inline local hero & fallback images as base64 data URIs so file:// standalone app has zero broken images
+      const localImages = [
+        'cinema_archive_hero_1793538459096.jpg',
+        'poster_fallback_artdeco_1793538460528.jpg',
+        'academy_ceremony_ledger_1793538461008.jpg',
+      ];
+      for (const imgName of localImages) {
+        const imgFullPath = path.join(__dirname, 'src', 'assets', 'images', imgName);
+        if (fs.existsSync(imgFullPath)) {
+          const base64 = fs.readFileSync(imgFullPath).toString('base64');
+          const dataUri = `data:image/jpeg;base64,${base64}`;
+          combinedJs = combinedJs.split(`/src/assets/images/${imgName}`).join(dataUri);
+        }
+      }
+
+      // Escape closing script tags inside JS bundle
+      const safeJs = combinedJs.replace(/<\/script>/gi, '<\\/script>');
+
+      const snapshotPayload = {
+        archive: req.body?.archive || null,
+        profiles: req.body?.profiles || null,
+        exportedAt: new Date().toISOString(),
+      };
+      const safeSnapshotJson = JSON.stringify(snapshotPayload).replace(/<\/script>/gi, '<\\/script>');
+
+      const standaloneHtml = `<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PMDB · The Personal Movie Database (Standalone Desktop Edition)</title>
+    <meta name="description" content="Standalone Desktop Executable of PMDB, The Personal Movie Database." />
+    <meta name="theme-color" content="#0C0C0E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,400;1,600&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <style>${combinedCss}</style>
+  </head>
+  <body class="bg-[#FBF9F5] dark:bg-[#0C0C0E] text-[#181615] dark:text-[#F4F1EA] antialiased selection:bg-[#D4AF37]/30 selection:text-[#D4AF37]">
+    <div id="root"></div>
+    <script>
+      window.__PMDB_STANDALONE_SNAPSHOT__ = ${safeSnapshotJson};
+    </script>
+    <script type="module">
+${safeJs}
+    </script>
+  </body>
+</html>`;
+
+      const distDir = path.join(__dirname, 'dist');
+      if (!fs.existsSync(distDir)) {
+        fs.mkdirSync(distDir, { recursive: true });
+      }
+      const outPath = path.join(distDir, 'PMDB-Standalone-Desktop.html');
+      fs.writeFileSync(outPath, standaloneHtml, 'utf-8');
+
+      res.json({
+        success: true,
+        fileName: 'PMDB-Standalone-Desktop.html',
+        sizeBytes: Buffer.byteLength(standaloneHtml, 'utf-8'),
+        htmlContent: standaloneHtml,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        error: err?.message || 'Failed to compile standalone desktop bundle',
+      });
+    }
   });
 
   if (process.env.NODE_ENV !== 'production') {

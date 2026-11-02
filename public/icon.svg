@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="72" fill="#0C0C0E"/>
+  <rect x="28" y="28" width="456" height="456" rx="52" fill="#141519" stroke="#D4AF37" stroke-width="6"/>
+  <!-- 35mm Sprocket Holes Left -->
+  <rect x="52" y="72" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="52" y="136" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="52" y="200" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="52" y="264" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="52" y="328" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="52" y="392" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <!-- 35mm Sprocket Holes Right -->
+  <rect x="438" y="72" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="438" y="136" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="438" y="200" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="438" y="264" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="438" y="328" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <rect x="438" y="392" width="22" height="32" rx="4" fill="#D4AF37" opacity="0.85"/>
+  <!-- Inner Frame -->
+  <rect x="96" y="64" width="320" height="384" rx="16" fill="#0C0C0E" stroke="#262830" stroke-width="4"/>
+  <!-- Gold Star Emblem -->
+  <polygon points="256,112 279,162 334,168 293,205 304,259 256,232 208,259 219,205 178,168 233,162" fill="#D4AF37"/>
+  <!-- PMDB Wordmark -->
+  <text x="256" y="346" text-anchor="middle" font-family="Georgia, serif" font-size="76" font-weight="bold" fill="#F4F1EA" letter-spacing="4">PMDB</text>
+  <text x="256" y="396" text-anchor="middle" font-family="monospace" font-size="20" font-weight="600" fill="#D4AF37" letter-spacing="6">1927–2026</text>
+</svg>

@@ -313,7 +313,7 @@ export const FilmDetailModal: React.FC<FilmDetailModalProps> = ({
             <PosterVisual
               film={{
                 ...film,
-                metadata: { ...film.metadata, posterUrl: posterUrl || film.metadata.posterUrl },
+                metadata: { ...(film.metadata || {}), posterUrl: posterUrl || film.metadata?.posterUrl },
               }}
               className="w-full aspect-[2/3]"
             />
