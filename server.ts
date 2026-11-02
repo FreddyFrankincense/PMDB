@@ -32,6 +32,18 @@ interface EnrichedFilmPayload {
 }
 
 const memoryCache = new Map<string, EnrichedFilmPayload>();
+const inFlightEnrichments = new Map<string, Promise<EnrichedFilmPayload>>();
+const profileScrapeCache = new Map<string, { timestamp: number; payload: any }>();
+const PROFILE_SCRAPE_TTL_MS = 5 * 60 * 1000;
+
+function getCachedFilmPayload(title: string, year?: number): EnrichedFilmPayload | undefined {
+  const lower = title.trim().toLowerCase();
+  if (year) {
+    const exact = memoryCache.get(`${lower}::${year}`);
+    if (exact) return exact;
+  }
+  return memoryCache.get(`${lower}::`);
+}
 
 function normalizeQuery(str: string): string {
   return str
@@ -249,6 +261,101 @@ async function fetchItunesMovieFallback(title: string, year?: number): Promise<P
   }
 }
 
+/**
+ * Unified, deduplicated metadata resolver.
+ * - Reuses `memoryCache` and `inFlightEnrichments` so identical concurrent or sequential requests
+ *   never scrape external endpoints twice.
+ * - Uses local `FILM_CATALOG` metadata first and only invokes the 2-step Wikipedia infobox scraper
+ *   when `includeExtendedCredits` is requested or when IMDb + iTunes did not resolve a poster/director.
+ */
+async function enrichFilmDeduplicated(
+  title: string,
+  year?: number,
+  includeExtendedCredits = true
+): Promise<EnrichedFilmPayload> {
+  const cleanTitle = title.trim();
+  const cacheKey = `${cleanTitle.toLowerCase()}::${year || ''}`;
+  const existing = memoryCache.get(cacheKey);
+
+  // If already cached and either has extended credits or caller only needs poster/basic metadata, return immediately
+  if (
+    existing &&
+    (!includeExtendedCredits ||
+      existing.cinematographer ||
+      existing.writers ||
+      existing.source.includes('Wikipedia'))
+  ) {
+    return existing;
+  }
+
+  const inflightKey = `${cacheKey}::${includeExtendedCredits ? 'full' : 'fast'}`;
+  const activePromise = inFlightEnrichments.get(inflightKey);
+  if (activePromise) {
+    return activePromise;
+  }
+
+  const localMeta = resolveFilmMetadata(cleanTitle, year);
+  const hasCanonicalLocalMeta = localMeta.director !== 'Archive Filmmaker';
+
+  const promise = (async (): Promise<EnrichedFilmPayload> => {
+    try {
+      const [imdbData, itunesData] = await Promise.all([
+        fetchImdbSuggestion(cleanTitle, year),
+        fetchItunesMovieFallback(cleanTitle, year),
+      ]);
+
+      const fastPoster = existing?.posterUrl || imdbData.posterUrl || itunesData.posterUrl;
+      const fastDirector =
+        existing?.director ||
+        itunesData.director ||
+        (hasCanonicalLocalMeta ? localMeta.director : undefined);
+
+      // Only scrape Wikipedia's 2-step API if full credits are needed or poster/director are still missing
+      const needsWiki = includeExtendedCredits || !fastPoster || !fastDirector;
+      const wikiData = needsWiki ? await fetchWikipediaFilmCredits(cleanTitle, year) : {};
+
+      const merged: EnrichedFilmPayload = {
+        title: cleanTitle,
+        year: year || imdbData.year || localMeta.year || new Date().getFullYear(),
+        imdbId: imdbData.imdbId || existing?.imdbId,
+        posterUrl: fastPoster || wikiData.posterUrl,
+        director: wikiData.director || fastDirector,
+        cast:
+          wikiData.cast && wikiData.cast.length > 0
+            ? wikiData.cast
+            : imdbData.cast || existing?.cast,
+        writers: wikiData.writers || existing?.writers,
+        cinematographer: wikiData.cinematographer || existing?.cinematographer,
+        composer: wikiData.composer || existing?.composer,
+        editor: wikiData.editor || existing?.editor,
+        country: wikiData.country || existing?.country || localMeta.country,
+        runtime:
+          itunesData.runtime ||
+          existing?.runtime ||
+          (localMeta.runtimeMinutes ? `${localMeta.runtimeMinutes}m` : undefined),
+        genres:
+          itunesData.genres && itunesData.genres.length > 0
+            ? itunesData.genres
+            : existing?.genres || localMeta.genres,
+        source: needsWiki
+          ? 'IMDb + Wikipedia + iTunes Public Index'
+          : 'IMDb + iTunes + Local Canon Index',
+      };
+
+      memoryCache.set(cacheKey, merged);
+      if (year) {
+        memoryCache.set(`${cleanTitle.toLowerCase()}::`, merged);
+      }
+      return merged;
+    } finally {
+      inFlightEnrichments.delete(inflightKey);
+    }
+  })();
+
+  inFlightEnrichments.set(inflightKey, promise);
+  return promise;
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -259,43 +366,72 @@ async function startServer() {
   app.get('/api/metadata/enrich', async (req, res) => {
     const title = String(req.query.title || '').trim();
     const year = req.query.year ? Number(req.query.year) : undefined;
+    const fastMode = req.query.fast === '1';
 
     if (!title) {
       res.status(400).json({ error: 'Missing film title parameter' });
       return;
     }
 
-    const cacheKey = `${title.toLowerCase()}::${year || ''}`;
-    if (memoryCache.has(cacheKey)) {
-      res.json(memoryCache.get(cacheKey));
+    const enriched = await enrichFilmDeduplicated(title, year, !fastMode);
+    res.json(enriched);
+  });
+
+  // Endpoint 1B: Batch enrich multiple films in a single HTTP request with server-side deduplication
+  app.post('/api/metadata/enrich-batch', async (req, res) => {
+    const rawItems: Array<{ id?: string; title: string; year?: number }> = Array.isArray(
+      req.body?.items
+    )
+      ? req.body.items
+      : [];
+    const includeExtendedCredits = Boolean(req.body?.includeExtendedCredits);
+
+    if (rawItems.length === 0) {
+      res.json({ results: {} });
       return;
     }
 
-    const [imdbData, wikiData, itunesData] = await Promise.all([
-      fetchImdbSuggestion(title, year),
-      fetchWikipediaFilmCredits(title, year),
-      fetchItunesMovieFallback(title, year),
-    ]);
+    // Deduplicate requested items by normalized title::year so duplicate films across profiles/lists
+    // are only enriched once
+    const uniqueQueue: Array<{ key: string; title: string; year?: number }> = [];
+    const seenKeys = new Set<string>();
 
-    const merged: EnrichedFilmPayload = {
-      title,
-      year: year || imdbData.year || new Date().getFullYear(),
-      imdbId: imdbData.imdbId,
-      posterUrl: imdbData.posterUrl || itunesData.posterUrl || wikiData.posterUrl,
-      director: wikiData.director || itunesData.director,
-      cast: wikiData.cast && wikiData.cast.length > 0 ? wikiData.cast : imdbData.cast,
-      writers: wikiData.writers,
-      cinematographer: wikiData.cinematographer,
-      composer: wikiData.composer,
-      editor: wikiData.editor,
-      country: wikiData.country,
-      runtime: itunesData.runtime,
-      genres: itunesData.genres,
-      source: 'IMDb + Wikipedia + iTunes Public Index',
-    };
+    for (const item of rawItems.slice(0, 50)) {
+      const cleanTitle = String(item?.title || '').trim();
+      if (!cleanTitle) continue;
+      const year = item?.year ? Number(item.year) : undefined;
+      const key = `${cleanTitle.toLowerCase()}::${year || ''}`;
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        uniqueQueue.push({ key, title: cleanTitle, year });
+      }
+    }
 
-    memoryCache.set(cacheKey, merged);
-    res.json(merged);
+    const resultsByKey: Record<string, EnrichedFilmPayload> = {};
+    const CONCURRENCY = 4;
+    let cursor = 0;
+
+    async function worker() {
+      while (cursor < uniqueQueue.length) {
+        const current = uniqueQueue[cursor++];
+        if (!current) break;
+        const enriched = await enrichFilmDeduplicated(
+          current.title,
+          current.year,
+          includeExtendedCredits
+        );
+        resultsByKey[current.key] = enriched;
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, uniqueQueue.length) }, () => worker())
+    );
+
+    res.json({
+      results: resultsByKey,
+      deduplicatedCount: uniqueQueue.length,
+    });
   });
 
   // Endpoint 2: Search public IMDb catalog to quickly add films from any year (1927-present)
@@ -343,6 +479,7 @@ async function startServer() {
   });
 
   // Helper to parse Letterboxd RSS XML or HTML snippets into FilmEntry objects
+  // while sharing posters and metadata with `memoryCache`
   function parseLetterboxdRssOrHtml(rawContent: string, username: string) {
     const films: any[] = [];
     const seenKeys = new Set<string>();
@@ -394,7 +531,12 @@ async function startServer() {
         : `https://letterboxd.com/film/${slug}/`;
 
       let cleanNotes = '';
+      let rssPosterUrl: string | undefined;
       if (descMatch && descMatch[1]) {
+        const imgMatch = descMatch[1].match(/<img[^>]+src=["']([^"']+)["']/i);
+        if (imgMatch?.[1]) {
+          rssPosterUrl = imgMatch[1];
+        }
         cleanNotes = descMatch[1]
           .replace(/<img[^>]*>/gi, '')
           .replace(/<p>\s*Watched on[^<]*<\/p>/gi, '')
@@ -404,13 +546,35 @@ async function startServer() {
       }
 
       const meta = resolveFilmMetadata(title, releaseYear, slug);
+      const cached = getCachedFilmPayload(meta.title, releaseYear);
+
+      // If RSS provided a poster URL and this film isn't in memoryCache yet, seed memoryCache
+      // so the enrichment endpoint doesn't have to re-scrape a poster!
+      if (rssPosterUrl && !cached) {
+        memoryCache.set(key, {
+          title: meta.title,
+          year: releaseYear,
+          posterUrl: rssPosterUrl,
+          director: meta.director !== 'Archive Filmmaker' ? meta.director : undefined,
+          genres: meta.genres,
+          runtime: `${meta.runtimeMinutes}m`,
+          country: meta.country,
+          source: 'Letterboxd RSS Poster + Local Canon',
+        });
+      }
+
+      const resolvedPoster = cached?.posterUrl || rssPosterUrl;
+      const cachedRuntime = cached?.runtime
+        ? parseInt(cached.runtime.replace(/[^0-9]/g, ''), 10)
+        : NaN;
+
       films.push({
         id: `${username}-${rankCounter}-${Date.now()}`,
-        title,
+        title: meta.title,
         year: releaseYear,
         slug: meta.slug,
-        director: meta.director,
-        genres: meta.genres,
+        director: cached?.director || meta.director,
+        genres: cached?.genres && cached.genres.length > 0 ? cached.genres : meta.genres,
         rating,
         liked: rating !== null && rating >= 4.0,
         rewatch,
@@ -422,8 +586,9 @@ async function startServer() {
         customRank: rankCounter++,
         notes: cleanNotes || 'Logged via external profile view.',
         letterboxdUri,
-        runtimeMinutes: meta.runtimeMinutes,
-        country: meta.country,
+        runtimeMinutes: !Number.isNaN(cachedRuntime) ? cachedRuntime : meta.runtimeMinutes,
+        country: cached?.country || meta.country,
+        posterUrl: resolvedPoster,
       });
     }
 
@@ -439,14 +604,18 @@ async function startServer() {
 
       const slug = slugifyTitle(title, releaseYear);
       const meta = resolveFilmMetadata(title, releaseYear, slug);
+      const cached = getCachedFilmPayload(meta.title, releaseYear);
+      const cachedRuntime = cached?.runtime
+        ? parseInt(cached.runtime.replace(/[^0-9]/g, ''), 10)
+        : NaN;
       const today = new Date().toISOString().slice(0, 10);
       films.push({
         id: `${username}-html-${rankCounter}-${Date.now()}`,
-        title,
+        title: meta.title,
         year: releaseYear,
         slug: meta.slug,
-        director: meta.director,
-        genres: meta.genres,
+        director: cached?.director || meta.director,
+        genres: cached?.genres && cached.genres.length > 0 ? cached.genres : meta.genres,
         rating: 4.0,
         liked: true,
         rewatch: false,
@@ -458,8 +627,9 @@ async function startServer() {
         customRank: rankCounter++,
         notes: 'Logged via external profile view.',
         letterboxdUri: `https://letterboxd.com/film/${meta.slug}/`,
-        runtimeMinutes: meta.runtimeMinutes,
-        country: meta.country,
+        runtimeMinutes: !Number.isNaN(cachedRuntime) ? cachedRuntime : meta.runtimeMinutes,
+        country: cached?.country || meta.country,
+        posterUrl: cached?.posterUrl,
       });
     }
 
@@ -473,8 +643,16 @@ async function startServer() {
   // Endpoint 3: Fetch public Letterboxd profile RSS feed or generate deterministic archive fallback
   app.get('/api/letterboxd/profile/:username', async (req, res) => {
     const rawUsername = String(req.params.username || '').trim().replace(/^@/, '');
+    const forceRefresh = req.query.refresh === '1';
     if (!rawUsername) {
       res.status(400).json({ error: 'Missing Letterboxd username' });
+      return;
+    }
+
+    const cacheKey = rawUsername.toLowerCase();
+    const cachedProfile = profileScrapeCache.get(cacheKey);
+    if (!forceRefresh && cachedProfile && Date.now() - cachedProfile.timestamp < PROFILE_SCRAPE_TTL_MS) {
+      res.json(cachedProfile.payload);
       return;
     }
 
@@ -492,7 +670,7 @@ async function startServer() {
         const xmlText = await response.text();
         const parsedFilms = parseLetterboxdRssOrHtml(xmlText, rawUsername);
         if (parsedFilms.length > 0) {
-          res.json({
+          const payload = {
             username: rawUsername,
             displayName: `@${rawUsername}`,
             profileUrl,
@@ -501,7 +679,9 @@ async function startServer() {
             liveReachable: true,
             films: parsedFilms,
             notice: `Fetched ${parsedFilms.length} recent diary entries directly from ${rssUrl}.`,
-          });
+          };
+          profileScrapeCache.set(cacheKey, { timestamp: Date.now(), payload });
+          res.json(payload);
           return;
         }
       }
@@ -514,8 +694,11 @@ async function startServer() {
     for (let i = 0; i < rawUsername.length; i++) {
       seed = (seed * 31 + rawUsername.charCodeAt(i)) % 10000;
     }
-    const fallbackFilms = generateHighVolumeFilmArchive(240, (seed % 11) + 2, 0);
-    res.json({
+    const fallbackFilms = generateHighVolumeFilmArchive(240, (seed % 11) + 2, 0).map((f) => {
+      const cached = getCachedFilmPayload(f.title, f.year);
+      return cached?.posterUrl ? { ...f, posterUrl: cached.posterUrl } : f;
+    });
+    const fallbackPayload = {
       username: rawUsername,
       displayName: `@${rawUsername}`,
       profileUrl,
@@ -524,7 +707,9 @@ async function startServer() {
       liveReachable: false,
       films: fallbackFilms,
       notice: `Letterboxd RSS endpoint (${rssUrl}) was unreachable or rate-limited; loaded ${fallbackFilms.length}-film archive profile for @${rawUsername}. Upload a Letterboxd CSV export for exact personal logs.`,
-    });
+    };
+    profileScrapeCache.set(cacheKey, { timestamp: Date.now(), payload: fallbackPayload });
+    res.json(fallbackPayload);
   });
 
   // Endpoint 4: Parse raw pasted Letterboxd RSS XML or HTML source
@@ -552,8 +737,69 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
+    process.env.DISABLE_HMR = 'true';
+
+    // Serve a WebSocket-free @vite/client module so CSS injection (updateStyle/removeStyle)
+    // and module hot contexts work without attempting blocked WebSocket connections in preview.
+    app.get('/@vite/client', (_req, res) => {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.send(`
+const sheetsMap = new Map();
+
+export function updateStyle(id, content) {
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    document.head.appendChild(style);
+  } else {
+    style.textContent = content;
+  }
+  sheetsMap.set(id, style);
+}
+
+export function removeStyle(id) {
+  const style = sheetsMap.get(id);
+  if (style) {
+    document.head.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+
+export function createHotContext() {
+  return {
+    data: {},
+    accept() {},
+    acceptExports() {},
+    dispose() {},
+    prune() {},
+    invalidate() {},
+    on() {},
+    off() {},
+    send() {},
+  };
+}
+
+export function injectQuery(url, queryToInject) {
+  if (!url || (url[0] !== '.' && url[0] !== '/')) return url;
+  const pathname = url.replace(/[?#].*$/, '');
+  const { search, hash } = new URL(url, 'http://vite.dev');
+  return \`\${pathname}?\${queryToInject}\${search ? '&' + search.slice(1) : ''}\${hash || ''}\`;
+}
+
+export class ErrorOverlay extends HTMLElement {}
+`);
+    });
+
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        watch: null,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

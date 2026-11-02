@@ -4,18 +4,22 @@ import {
   Bookmark,
   ChevronLeft,
   ChevronRight,
+  Compass,
   FileText,
   Filter,
   Layers,
   RotateCcw,
+  Scale,
   Search,
   Star,
   Trash2,
+  TrendingUp,
   X,
 } from 'lucide-react';
 import { FilmEntry, ProfileAccount } from '../types/letterboxd';
 import { ViewingCalendarHeatmap } from './ViewingCalendarHeatmap';
 import { FilmGroupCohort, GroupHistogramPanel } from './GroupHistogramPanel';
+import { DecadeOscarDivergenceSubView } from './DecadeOscarDivergenceSubView';
 
 interface AnalyticsViewProps {
   profile: ProfileAccount;
@@ -24,7 +28,11 @@ interface AnalyticsViewProps {
   onSelectCohort?: (cohort: FilmGroupCohort | null) => void;
   onSaveCohort?: (name: string, films: FilmEntry[]) => void;
   onDeleteSavedCohort?: (id: string) => void;
+  onInspectFilm?: (film: FilmEntry) => void;
+  onInspectExternalFilm?: (title: string, year: number, director?: string) => void;
 }
+
+type AnalyticsLabSubView = 'overview' | 'oscar_decade_divergence';
 
 const RATING_BUCKETS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0];
 
@@ -41,11 +49,25 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   onSelectCohort,
   onSaveCohort,
   onDeleteSavedCohort,
+  onInspectFilm,
+  onInspectExternalFilm,
 }) => {
+  const [analyticsSubView, setAnalyticsSubView] = useState<AnalyticsLabSubView>('overview');
   const [selectedRatingBucket, setSelectedRatingBucket] = useState<number | null>(null);
   const [selectedPeriodBucket, setSelectedPeriodBucket] = useState<string | null>(null);
+  const [selectedReleaseEraBucket, setSelectedReleaseEraBucket] = useState<{
+    type: 'decade' | 'year';
+    label: string;
+    value: number;
+  } | null>(null);
   const [chartOrientation, setChartOrientation] = useState<'vertical' | 'horizontal'>('vertical');
   const [timelineGranularity, setTimelineGranularity] = useState<'yearly' | 'monthly'>('yearly');
+
+  // Release Era Evolution Trend Chart controls
+  const [releaseTrendResolution, setReleaseTrendResolution] = useState<'decade' | 'year'>('decade');
+  const [releaseTrendScale, setReleaseTrendScale] = useState<'dynamic' | 'full'>('dynamic');
+  const [releaseYearMinFilms, setReleaseYearMinFilms] = useState<number>(1);
+  const [hoveredTrendKey, setHoveredTrendKey] = useState<string | null>(null);
 
   const [inlineReviewPhrase, setInlineReviewPhrase] = useState<string>('');
   const [inlineMetadataQuery, setInlineMetadataQuery] = useState<string>('');
@@ -181,6 +203,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
     setTraySearch('');
     setSelectedRatingBucket(null);
     setSelectedPeriodBucket(null);
+    setSelectedReleaseEraBucket(null);
   }, [profile.id, resolvedCohort.id]);
 
   const accountBaselineMean = useMemo(() => {
@@ -314,33 +337,153 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       })
       .sort((a, b) => b.count - a.count);
 
+    // Baseline account decade map for reference when subset is active
+    const baselineDecadeMap = new Map<number, { sum: number; count: number }>();
+    profile.films.forEach((f) => {
+      if (!f.year || f.rating === null) return;
+      const decNum = Math.floor(f.year / 10) * 10;
+      const cur = baselineDecadeMap.get(decNum) || { sum: 0, count: 0 };
+      cur.sum += f.rating;
+      cur.count += 1;
+      baselineDecadeMap.set(decNum, cur);
+    });
+
     const decadeMap = new Map<
-      string,
-      { decade: string; count: number; ratingSum: number; ratedCount: number }
+      number,
+      {
+        decadeNum: number;
+        decade: string;
+        count: number;
+        ratingSum: number;
+        ratedCount: number;
+        fiveStarCount: number;
+        topFilm: FilmEntry | null;
+      }
     >();
     films.forEach((f) => {
-      const dec = `${Math.floor(f.year / 10) * 10}s`;
-      const cur = decadeMap.get(dec) || {
+      if (!f.year) return;
+      const decNum = Math.floor(f.year / 10) * 10;
+      const dec = `${decNum}s`;
+      const cur = decadeMap.get(decNum) || {
+        decadeNum: decNum,
         decade: dec,
         count: 0,
         ratingSum: 0,
         ratedCount: 0,
+        fiveStarCount: 0,
+        topFilm: null,
       };
       cur.count += 1;
       if (f.rating !== null) {
         cur.ratingSum += f.rating;
         cur.ratedCount += 1;
+        if (f.rating >= 4.5) cur.fiveStarCount += 1;
+        if (
+          !cur.topFilm ||
+          (cur.topFilm.rating ?? 0) < f.rating ||
+          ((cur.topFilm.rating ?? 0) === f.rating && (f.liked && !cur.topFilm.liked))
+        ) {
+          cur.topFilm = f;
+        }
+      } else if (!cur.topFilm) {
+        cur.topFilm = f;
       }
-      decadeMap.set(dec, cur);
+      decadeMap.set(decNum, cur);
     });
 
     const decades = Array.from(decadeMap.values())
-      .map((d) => ({
-        ...d,
-        avgRating: d.ratedCount > 0 ? d.ratingSum / d.ratedCount : 0,
-      }))
-      .sort((a, b) => a.decade.localeCompare(b.decade));
+      .map((d) => {
+        const avgRating = d.ratedCount > 0 ? d.ratingSum / d.ratedCount : 0;
+        const baseDec = baselineDecadeMap.get(d.decadeNum);
+        const baselineAvg = baseDec && baseDec.count > 0 ? baseDec.sum / baseDec.count : null;
+        return {
+          ...d,
+          avgRating,
+          biasVsMean: d.ratedCount > 0 ? avgRating - meanRating : 0,
+          baselineAvg,
+        };
+      })
+      .sort((a, b) => a.decadeNum - b.decadeNum);
     const maxDecadeCount = Math.max(1, ...decades.map((d) => d.count));
+
+    // Year-of-Release evolution series
+    const releaseYearMap = new Map<
+      number,
+      {
+        year: number;
+        count: number;
+        ratingSum: number;
+        ratedCount: number;
+        fiveStarCount: number;
+        topFilm: FilmEntry | null;
+      }
+    >();
+    films.forEach((f) => {
+      if (!f.year) return;
+      const cur = releaseYearMap.get(f.year) || {
+        year: f.year,
+        count: 0,
+        ratingSum: 0,
+        ratedCount: 0,
+        fiveStarCount: 0,
+        topFilm: null,
+      };
+      cur.count += 1;
+      if (f.rating !== null) {
+        cur.ratingSum += f.rating;
+        cur.ratedCount += 1;
+        if (f.rating >= 4.5) cur.fiveStarCount += 1;
+        if (!cur.topFilm || (cur.topFilm.rating ?? 0) < f.rating) {
+          cur.topFilm = f;
+        }
+      } else if (!cur.topFilm) {
+        cur.topFilm = f;
+      }
+      releaseYearMap.set(f.year, cur);
+    });
+
+    const rawReleaseYears = Array.from(releaseYearMap.values())
+      .filter((y) => y.ratedCount > 0)
+      .map((y) => ({
+        ...y,
+        avgRating: y.ratingSum / y.ratedCount,
+        biasVsMean: y.ratingSum / y.ratedCount - meanRating,
+      }))
+      .sort((a, b) => a.year - b.year);
+
+    // Compute 5-item centered rolling average across release years
+    const releaseYearsWithRolling = rawReleaseYears.map((item, idx, arr) => {
+      const windowSlice = arr.slice(Math.max(0, idx - 2), Math.min(arr.length, idx + 3));
+      const weightedSum = windowSlice.reduce((s, w) => s + w.ratingSum, 0);
+      const weightedCount = windowSlice.reduce((s, w) => s + w.ratedCount, 0);
+      const rollingAvg = weightedCount > 0 ? weightedSum / weightedCount : item.avgRating;
+      return {
+        ...item,
+        rollingAvg,
+      };
+    });
+
+    // Classic (<2000) vs Modern (>=2000) taste evolution summary
+    const classicRated = ratedFilms.filter((f) => f.year < 2000);
+    const modernRated = ratedFilms.filter((f) => f.year >= 2000);
+    const classicMean =
+      classicRated.length > 0
+        ? classicRated.reduce((s, f) => s + (f.rating ?? 0), 0) / classicRated.length
+        : 0;
+    const modernMean =
+      modernRated.length > 0
+        ? modernRated.reduce((s, f) => s + (f.rating ?? 0), 0) / modernRated.length
+        : 0;
+
+    const ratedDecades = decades.filter((d) => d.ratedCount > 0);
+    const highestRatedDecade =
+      ratedDecades.length > 0
+        ? [...ratedDecades].sort((a, b) => b.avgRating - a.avgRating || b.ratedCount - a.ratedCount)[0]
+        : null;
+    const lowestRatedDecade =
+      ratedDecades.length > 0
+        ? [...ratedDecades].sort((a, b) => a.avgRating - b.avgRating || b.ratedCount - a.ratedCount)[0]
+        : null;
 
     const directorMap = new Map<string, { director: string; count: number; ratingSum: number }>();
     films.forEach((f) => {
@@ -381,10 +524,18 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       maxPeriodTotal,
       genreBreakdown,
       decades,
+      ratedDecades,
       maxDecadeCount,
+      releaseYears: releaseYearsWithRolling,
+      classicMean,
+      classicRatedCount: classicRated.length,
+      modernMean,
+      modernRatedCount: modernRated.length,
+      highestRatedDecade,
+      lowestRatedDecade,
       topDirectors,
     };
-  }, [resolvedCohort.films, timelineGranularity]);
+  }, [resolvedCohort.films, profile.films, timelineGranularity]);
 
   const bucketFilteredFilms = useMemo(() => {
     let base = resolvedCohort.films;
@@ -394,6 +545,14 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       base = base.filter(
         (f) => f.watchedDate && f.watchedDate.startsWith(selectedPeriodBucket)
       );
+    } else if (selectedReleaseEraBucket !== null) {
+      if (selectedReleaseEraBucket.type === 'decade') {
+        base = base.filter(
+          (f) => Math.floor(f.year / 10) * 10 === selectedReleaseEraBucket.value
+        );
+      } else {
+        base = base.filter((f) => f.year === selectedReleaseEraBucket.value);
+      }
     } else {
       return [];
     }
@@ -408,7 +567,13 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       );
     }
     return base;
-  }, [resolvedCohort.films, selectedRatingBucket, selectedPeriodBucket, traySearch]);
+  }, [
+    resolvedCohort.films,
+    selectedRatingBucket,
+    selectedPeriodBucket,
+    selectedReleaseEraBucket,
+    traySearch,
+  ]);
 
   const trayTotalPages = Math.max(1, Math.ceil(bucketFilteredFilms.length / TRAY_PAGE_SIZE));
   const safeTrayPage = Math.min(trayPage, trayTotalPages);
@@ -422,8 +587,211 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
     return Math.max(0, Math.min(100, ((stats.meanRating - 0.25) / 5.0) * 100));
   }, [stats.meanRating, stats.ratedCount]);
 
+  // Build SVG geometry for the Release Decade / Release Year Taste Evolution Trend Line Chart
+  const releaseTrendData = useMemo(() => {
+    if (releaseTrendResolution === 'decade') {
+      return stats.ratedDecades.map((d) => ({
+        key: d.decade,
+        label: d.decade,
+        numericValue: d.decadeNum,
+        type: 'decade' as const,
+        avgRating: d.avgRating,
+        rollingAvg: d.avgRating,
+        baselineAvg: d.baselineAvg,
+        ratedCount: d.ratedCount,
+        totalCount: d.count,
+        fiveStarCount: d.fiveStarCount,
+        biasVsMean: d.biasVsMean,
+        topFilm: d.topFilm,
+      }));
+    }
+    return stats.releaseYears
+      .filter((y) => y.ratedCount >= releaseYearMinFilms)
+      .map((y) => ({
+        key: String(y.year),
+        label: String(y.year),
+        numericValue: y.year,
+        type: 'year' as const,
+        avgRating: y.avgRating,
+        rollingAvg: y.rollingAvg,
+        baselineAvg: null as number | null,
+        ratedCount: y.ratedCount,
+        totalCount: y.count,
+        fiveStarCount: y.fiveStarCount,
+        biasVsMean: y.biasVsMean,
+        topFilm: y.topFilm,
+      }));
+  }, [releaseTrendResolution, stats.ratedDecades, stats.releaseYears, releaseYearMinFilms]);
+
+  const trendChartGeometry = useMemo(() => {
+    const width = 920;
+    const height = 290;
+    const padLeft = 48;
+    const padRight = 28;
+    const padTop = 26;
+    const padBottom = 42;
+    const plotWidth = width - padLeft - padRight;
+    const plotHeight = height - padTop - padBottom;
+
+    if (releaseTrendData.length === 0) {
+      return null;
+    }
+
+    const allRatings = releaseTrendData.flatMap((d) =>
+      d.baselineAvg !== null ? [d.avgRating, d.rollingAvg, d.baselineAvg] : [d.avgRating, d.rollingAvg]
+    );
+    if (stats.meanRating > 0) allRatings.push(stats.meanRating);
+
+    let minRating = 0.5;
+    let maxRating = 5.0;
+    if (releaseTrendScale === 'dynamic' && allRatings.length > 0) {
+      const rawMin = Math.min(...allRatings);
+      const rawMax = Math.max(...allRatings);
+      minRating = Math.max(0.5, Math.floor((rawMin - 0.25) * 4) / 4);
+      maxRating = Math.min(5.0, Math.ceil((rawMax + 0.25) * 4) / 4);
+      if (maxRating - minRating < 1.0) {
+        minRating = Math.max(0.5, minRating - 0.5);
+        maxRating = Math.min(5.0, maxRating + 0.5);
+      }
+    }
+
+    const maxVolume = Math.max(1, ...releaseTrendData.map((d) => d.ratedCount));
+
+    const getX = (idx: number) => {
+      if (releaseTrendData.length === 1) return padLeft + plotWidth / 2;
+      return padLeft + (idx / (releaseTrendData.length - 1)) * plotWidth;
+    };
+
+    const getY = (rating: number) => {
+      const clamped = Math.max(minRating, Math.min(maxRating, rating));
+      const ratio = (clamped - minRating) / Math.max(0.01, maxRating - minRating);
+      return padTop + plotHeight - ratio * plotHeight;
+    };
+
+    const points = releaseTrendData.map((d, idx) => ({
+      ...d,
+      x: getX(idx),
+      y: getY(d.avgRating),
+      rollingY: getY(d.rollingAvg),
+      baselineY: d.baselineAvg !== null ? getY(d.baselineAvg) : null,
+      volumeBarHeight: Math.max(3, (d.ratedCount / maxVolume) * (plotHeight * 0.28)),
+    }));
+
+    const linePath = points
+      .map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+      .join(' ');
+
+    const rollingPath = points
+      .map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.rollingY.toFixed(1)}`)
+      .join(' ');
+
+    const areaPath =
+      points.length > 1
+        ? `${linePath} L ${points[points.length - 1].x.toFixed(1)} ${(padTop + plotHeight).toFixed(
+            1
+          )} L ${points[0].x.toFixed(1)} ${(padTop + plotHeight).toFixed(1)} Z`
+        : '';
+
+    const baselinePoints = points.filter((p) => p.baselineY !== null);
+    const baselinePath =
+      baselinePoints.length > 1
+        ? baselinePoints
+            .map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${(p.baselineY as number).toFixed(1)}`)
+            .join(' ')
+        : '';
+
+    const yTicks = [
+      maxRating,
+      minRating + (maxRating - minRating) * 0.75,
+      minRating + (maxRating - minRating) * 0.5,
+      minRating + (maxRating - minRating) * 0.25,
+      minRating,
+    ];
+
+    const meanY = stats.meanRating > 0 ? getY(stats.meanRating) : null;
+
+    return {
+      width,
+      height,
+      padLeft,
+      padRight,
+      padTop,
+      padBottom,
+      plotWidth,
+      plotHeight,
+      minRating,
+      maxRating,
+      points,
+      linePath,
+      rollingPath,
+      areaPath,
+      baselinePath,
+      yTicks,
+      meanY,
+    };
+  }, [releaseTrendData, releaseTrendScale, stats.meanRating]);
+
+  const inspectedTrendPoint = useMemo(() => {
+    if (releaseTrendData.length === 0) return null;
+    if (hoveredTrendKey) {
+      const match = releaseTrendData.find((p) => p.key === hoveredTrendKey);
+      if (match) return match;
+    }
+    if (selectedReleaseEraBucket) {
+      const match = releaseTrendData.find(
+        (p) =>
+          p.type === selectedReleaseEraBucket.type &&
+          p.numericValue === selectedReleaseEraBucket.value
+      );
+      if (match) return match;
+    }
+    return releaseTrendData[releaseTrendData.length - 1];
+  }, [releaseTrendData, hoveredTrendKey, selectedReleaseEraBucket]);
+
   return (
     <div className="space-y-6">
+      {/* Analytics & Taste Lab Sub-View Switcher Bar */}
+      <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4">
+        <div className="space-y-0.5">
+          <div className="text-[11px] font-mono tabular-nums uppercase tracking-widest text-amber-400">
+            Analytics &amp; Taste Lab (@{profile.username})
+          </div>
+          <h2 className="text-base sm:text-lg font-display font-semibold text-slate-100">
+            {analyticsSubView === 'overview'
+              ? 'Rating Distributions, Viewing Heatmap & Release Era Evolution'
+              : 'Decade Average Rating vs. Academy Awards Best Picture Average Rating'}
+          </h2>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5 p-1 bg-slate-950 border border-slate-800 rounded-lg">
+          <button
+            type="button"
+            onClick={() => setAnalyticsSubView('overview')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              analyticsSubView === 'overview'
+                ? 'bg-amber-500 text-slate-950 font-semibold'
+                : 'text-slate-300 hover:text-slate-100 hover:bg-slate-900'
+            }`}
+          >
+            <BarChart2 className="w-3.5 h-3.5" />
+            <span>1. Distribution, Timeline &amp; Taste Evolution</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setAnalyticsSubView('oscar_decade_divergence')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              analyticsSubView === 'oscar_decade_divergence'
+                ? 'bg-amber-500 text-slate-950 font-semibold'
+                : 'text-slate-300 hover:text-slate-100 hover:bg-slate-900'
+            }`}
+          >
+            <Scale className="w-3.5 h-3.5" />
+            <span>2. Decade Avg vs. Academy Best Picture Divergence</span>
+          </button>
+        </div>
+      </div>
+
       {/* Target Film Group / Cohort Scope Selector & Live Search Builder */}
       <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-3.5">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -621,15 +989,36 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         </div>
       </div>
 
-      {/* Multi-Dimension Group Histograms */}
-      <GroupHistogramPanel
-        cohort={resolvedCohort}
-        baselineAllFilms={profile.films}
-        onSaveCohort={onSaveCohort}
-      />
+      {analyticsSubView === 'oscar_decade_divergence' ? (
+        <DecadeOscarDivergenceSubView
+          profile={profile}
+          effectiveFilms={resolvedCohort.films}
+          cohortLabel={resolvedCohort.label}
+          isSubsetActive={isSubsetActive}
+          onInspectFilm={onInspectFilm}
+          onInspectExternalFilm={onInspectExternalFilm}
+          onSelectDecadeInOverview={(decadeNum, decadeLabel) => {
+            setAnalyticsSubView('overview');
+            setSelectedRatingBucket(null);
+            setSelectedPeriodBucket(null);
+            setSelectedReleaseEraBucket({
+              type: 'decade',
+              label: decadeLabel,
+              value: decadeNum,
+            });
+          }}
+        />
+      ) : (
+        <>
+          {/* Multi-Dimension Group Histograms */}
+          <GroupHistogramPanel
+            cohort={resolvedCohort}
+            baselineAllFilms={profile.films}
+            onSaveCohort={onSaveCohort}
+          />
 
-      {/* Top Metric Summary Strip */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          {/* Top Metric Summary Strip */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <div className="bg-slate-900 border border-slate-800 rounded-lg p-4">
           <div className="text-xs text-slate-400 mb-1">
             {isSubsetActive ? 'Group Films' : 'Total Logged Films'}
@@ -797,6 +1186,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                           type="button"
                           onClick={() => {
                             setSelectedPeriodBucket(null);
+                            setSelectedReleaseEraBucket(null);
                             setSelectedRatingBucket((prev) =>
                               prev === item.bucket ? null : item.bucket
                             );
@@ -874,6 +1264,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                     type="button"
                     onClick={() => {
                       setSelectedPeriodBucket(null);
+                      setSelectedReleaseEraBucket(null);
                       setSelectedRatingBucket((prev) =>
                         prev === item.bucket ? null : item.bucket
                       );
@@ -974,6 +1365,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                   type="button"
                   onClick={() => {
                     setSelectedRatingBucket(null);
+                    setSelectedReleaseEraBucket(null);
                     setSelectedPeriodBucket((prev) =>
                       prev === m.period ? null : m.period
                     );
@@ -1022,8 +1414,585 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         </div>
       </div>
 
+      {/* Taste Evolution by Film Release Decade & Release Year (Trend Line Chart) */}
+      <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-amber-400 shrink-0" />
+              <h3 className="text-sm font-display font-semibold text-slate-100">
+                Taste Evolution by Film Release Era (Average Rating Trend Line)
+              </h3>
+              <span className="px-2 py-0.5 text-[11px] font-mono tabular-nums rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                {releaseTrendResolution === 'decade'
+                  ? `${stats.ratedDecades.length} Decades Plotted`
+                  : `${releaseTrendData.length} Release Years Plotted`}
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-1">
+              Visualizes how @{profile.username}&apos;s mean star rating shifts across cinematic history by film release {releaseTrendResolution === 'decade' ? 'decade' : 'year'}. Click any node on the trend line to drill into the films of that era.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Resolution Switcher: By Release Decade vs. By Release Year */}
+            <div className="flex items-center gap-1 p-0.5 bg-slate-950 border border-slate-800 rounded-md">
+              <button
+                type="button"
+                onClick={() => {
+                  setReleaseTrendResolution('decade');
+                  setHoveredTrendKey(null);
+                }}
+                className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap ${
+                  releaseTrendResolution === 'decade'
+                    ? 'bg-amber-500 text-slate-950 font-semibold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                By Release Decade
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setReleaseTrendResolution('year');
+                  setHoveredTrendKey(null);
+                }}
+                className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap ${
+                  releaseTrendResolution === 'year'
+                    ? 'bg-amber-500 text-slate-950 font-semibold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                By Release Year + 5-Yr Rolling Avg
+              </button>
+            </div>
+
+            {/* Min Rated Films filter when in Release Year mode */}
+            {releaseTrendResolution === 'year' && (
+              <div className="flex items-center gap-1 p-0.5 bg-slate-950 border border-slate-800 rounded-md">
+                {[
+                  { min: 1, label: 'All Years' },
+                  { min: 2, label: '≥2 Rated' },
+                  { min: 3, label: '≥3 Rated' },
+                ].map((opt) => (
+                  <button
+                    key={opt.min}
+                    type="button"
+                    onClick={() => setReleaseYearMinFilms(opt.min)}
+                    className={`px-2 py-1 text-[11px] font-mono tabular-nums rounded transition-colors whitespace-nowrap ${
+                      releaseYearMinFilms === opt.min
+                        ? 'bg-slate-800 text-amber-300 font-semibold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Y-Axis Scale Toggle */}
+            <div className="flex items-center gap-1 p-0.5 bg-slate-950 border border-slate-800 rounded-md">
+              <button
+                type="button"
+                onClick={() => setReleaseTrendScale('dynamic')}
+                className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap ${
+                  releaseTrendScale === 'dynamic'
+                    ? 'bg-slate-800 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Zoom Y-axis to highlight subtle rating shifts across decades"
+              >
+                Zoom Shift
+              </button>
+              <button
+                type="button"
+                onClick={() => setReleaseTrendScale('full')}
+                className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap ${
+                  releaseTrendScale === 'full'
+                    ? 'bg-slate-800 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Show full 0.5★ – 5.0★ scale"
+              >
+                0.5★–5.0★ Scale
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setAnalyticsSubView('oscar_decade_divergence')}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 rounded-md transition-colors cursor-pointer whitespace-nowrap"
+            >
+              <Scale className="w-3.5 h-3.5" />
+              <span>Compare vs. Academy Best Picture by Decade →</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Era Evolution Summary Strip */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="bg-slate-950/90 border border-slate-800/90 rounded-md p-3">
+            <div className="text-[11px] text-slate-400">Peak Acclaim Era (Golden Decade)</div>
+            {stats.highestRatedDecade ? (
+              <>
+                <div className="mt-1 flex items-baseline justify-between gap-2 font-mono tabular-nums">
+                  <span className="text-base font-display font-bold text-amber-400">
+                    {stats.highestRatedDecade.decade}
+                  </span>
+                  <span className="text-sm font-semibold text-slate-100">
+                    {stats.highestRatedDecade.avgRating.toFixed(2)} ★
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
+                  {stats.highestRatedDecade.ratedCount} rated ·{' '}
+                  <span className="text-emerald-400">
+                    +{Math.max(0, stats.highestRatedDecade.biasVsMean).toFixed(2)}★ vs. mean
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div className="text-xs text-slate-500 mt-1">No rated decades</div>
+            )}
+          </div>
+
+          <div className="bg-slate-950/90 border border-slate-800/90 rounded-md p-3">
+            <div className="text-[11px] text-slate-400">Most Critical Era (Lowest Avg)</div>
+            {stats.lowestRatedDecade ? (
+              <>
+                <div className="mt-1 flex items-baseline justify-between gap-2 font-mono tabular-nums">
+                  <span className="text-base font-display font-bold text-slate-200">
+                    {stats.lowestRatedDecade.decade}
+                  </span>
+                  <span className="text-sm font-semibold text-slate-300">
+                    {stats.lowestRatedDecade.avgRating.toFixed(2)} ★
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
+                  {stats.lowestRatedDecade.ratedCount} rated ·{' '}
+                  <span className="text-rose-400">
+                    {stats.lowestRatedDecade.biasVsMean >= 0 ? '+' : ''}
+                    {stats.lowestRatedDecade.biasVsMean.toFixed(2)}★ vs. mean
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div className="text-xs text-slate-500 mt-1">No rated decades</div>
+            )}
+          </div>
+
+          <div className="bg-slate-950/90 border border-slate-800/90 rounded-md p-3">
+            <div className="text-[11px] text-slate-400">20th Century vs. 21st Century Shift</div>
+            {stats.classicRatedCount > 0 && stats.modernRatedCount > 0 ? (
+              <>
+                <div className="mt-1 flex items-baseline justify-between gap-2 font-mono tabular-nums">
+                  <span className="text-xs text-slate-300">
+                    Pre-2000: <strong className="text-amber-300">{stats.classicMean.toFixed(2)}★</strong>
+                  </span>
+                  <span className="text-xs text-slate-300">
+                    2000+: <strong className="text-sky-300">{stats.modernMean.toFixed(2)}★</strong>
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
+                  {stats.classicMean >= stats.modernMean ? (
+                    <span className="text-amber-300">
+                      +{(stats.classicMean - stats.modernMean).toFixed(2)}★ Classic Cinema Tilt
+                    </span>
+                  ) : (
+                    <span className="text-sky-300">
+                      +{(stats.modernMean - stats.classicMean).toFixed(2)}★ Contemporary Cinema Tilt
+                    </span>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="text-xs text-slate-400 font-mono tabular-nums mt-1">
+                {stats.classicRatedCount > 0
+                  ? `Pre-2000 Mean: ${stats.classicMean.toFixed(2)}★`
+                  : stats.modernRatedCount > 0
+                  ? `2000+ Mean: ${stats.modernMean.toFixed(2)}★`
+                  : 'Insufficient era spread'}
+              </div>
+            )}
+          </div>
+
+          {/* Active Hovered / Selected Node Inspector Card */}
+          <div className="bg-slate-950/90 border border-amber-500/30 rounded-md p-3">
+            <div className="flex items-center justify-between gap-2 text-[11px] text-amber-300/90">
+              <span className="inline-flex items-center gap-1 font-medium">
+                <Compass className="w-3 h-3" />
+                <span>
+                  {inspectedTrendPoint
+                    ? `Inspected ${inspectedTrendPoint.type === 'decade' ? 'Decade' : 'Release Year'}: ${inspectedTrendPoint.label}`
+                    : 'Era Inspector'}
+                </span>
+              </span>
+              {inspectedTrendPoint && (
+                <span className="font-mono tabular-nums text-amber-400 font-bold">
+                  {inspectedTrendPoint.avgRating.toFixed(2)} ★
+                </span>
+              )}
+            </div>
+            {inspectedTrendPoint ? (
+              <>
+                <div className="text-[11px] text-slate-300 font-mono tabular-nums mt-1">
+                  {inspectedTrendPoint.ratedCount} rated ({inspectedTrendPoint.fiveStarCount} ≥4.5★) ·{' '}
+                  <span
+                    className={
+                      inspectedTrendPoint.biasVsMean >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                    }
+                  >
+                    {inspectedTrendPoint.biasVsMean >= 0 ? '+' : ''}
+                    {inspectedTrendPoint.biasVsMean.toFixed(2)}★ vs. mean
+                  </span>
+                </div>
+                {inspectedTrendPoint.topFilm && (
+                  <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                    Top: <span className="text-slate-200">{inspectedTrendPoint.topFilm.title}</span>{' '}
+                    {inspectedTrendPoint.topFilm.rating !== null && (
+                      <span className="font-mono text-amber-400">
+                        ({inspectedTrendPoint.topFilm.rating.toFixed(1)}★)
+                      </span>
+                    )}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-xs text-slate-500 mt-1">Hover or click any point on chart</div>
+            )}
+          </div>
+        </div>
+
+        {/* SVG Trend Line Visualization */}
+        {!trendChartGeometry ? (
+          <div className="h-60 flex items-center justify-center bg-slate-950/60 border border-slate-800/80 rounded-md text-xs text-slate-400">
+            No rated films match the current filter criteria to plot a release-era rating trend line.
+          </div>
+        ) : (
+          <div className="bg-slate-950/70 border border-slate-800/80 rounded-md p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 mb-2 px-1">
+              <div className="flex flex-wrap items-center gap-4">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-3 h-0.5 bg-amber-400 inline-block rounded" />
+                  <span className="text-slate-200 font-medium">
+                    {releaseTrendResolution === 'decade'
+                      ? 'Decade Mean Star Rating'
+                      : '5-Year Rolling Mean Trajectory'}
+                  </span>
+                </span>
+                {releaseTrendResolution === 'year' && (
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-sky-400/80 inline-block" />
+                    <span>Annual Release Year Mean</span>
+                  </span>
+                )}
+                {isSubsetActive && releaseTrendResolution === 'decade' && (
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="w-3 h-0.5 border-b border-dashed border-sky-400 inline-block" />
+                    <span className="text-sky-300">Full Account Baseline</span>
+                  </span>
+                )}
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-3 h-0.5 border-b border-dashed border-emerald-400/80 inline-block" />
+                  <span className="text-emerald-300/90 font-mono tabular-nums">
+                    Overall Mean ({stats.meanRating.toFixed(2)}★)
+                  </span>
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 bg-slate-800 border border-slate-700 inline-block rounded-xs" />
+                  <span>Rated Volume (Background Bars)</span>
+                </span>
+              </div>
+              <span className="text-slate-500">
+                Click any {releaseTrendResolution === 'decade' ? 'decade' : 'year'} node to inspect films below
+              </span>
+            </div>
+
+            <svg
+              viewBox={`0 0 ${trendChartGeometry.width} ${trendChartGeometry.height}`}
+              className="w-full h-auto select-none overflow-visible"
+              role="img"
+              aria-label="Trend line chart showing shift in average ratings over film release decades and years"
+            >
+              <defs>
+                <linearGradient id="tasteEvolutionAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#f59e0b" stopOpacity="0.28" />
+                  <stop offset="85%" stopColor="#f59e0b" stopOpacity="0.03" />
+                  <stop offset="100%" stopColor="#f59e0b" stopOpacity="0.0" />
+                </linearGradient>
+              </defs>
+
+              {/* Horizontal Y-Axis Grid Lines & Star Labels */}
+              {trendChartGeometry.yTicks.map((tick, idx) => {
+                const ratio =
+                  (tick - trendChartGeometry.minRating) /
+                  Math.max(0.01, trendChartGeometry.maxRating - trendChartGeometry.minRating);
+                const y =
+                  trendChartGeometry.padTop +
+                  trendChartGeometry.plotHeight -
+                  ratio * trendChartGeometry.plotHeight;
+                return (
+                  <g key={idx}>
+                    <line
+                      x1={trendChartGeometry.padLeft}
+                      y1={y}
+                      x2={trendChartGeometry.width - trendChartGeometry.padRight}
+                      y2={y}
+                      stroke="#1e293b"
+                      strokeDasharray={idx === trendChartGeometry.yTicks.length - 1 ? undefined : '3 3'}
+                      strokeWidth="1"
+                    />
+                    <text
+                      x={trendChartGeometry.padLeft - 8}
+                      y={y + 3.5}
+                      textAnchor="end"
+                      className="fill-slate-500 text-[10px] font-mono tabular-nums"
+                    >
+                      {tick.toFixed(2)}★
+                    </text>
+                  </g>
+                );
+              })}
+
+              {/* Background Rated Film Volume Bars along bottom of plot */}
+              {trendChartGeometry.points.map((pt) => {
+                const barWidth =
+                  releaseTrendResolution === 'decade'
+                    ? Math.min(34, Math.max(12, trendChartGeometry.plotWidth / Math.max(2, trendChartGeometry.points.length) * 0.45))
+                    : Math.min(10, Math.max(3, trendChartGeometry.plotWidth / Math.max(10, trendChartGeometry.points.length) * 0.6));
+                const bottomY = trendChartGeometry.padTop + trendChartGeometry.plotHeight;
+                const isSelected =
+                  selectedReleaseEraBucket?.type === pt.type &&
+                  selectedReleaseEraBucket?.value === pt.numericValue;
+                return (
+                  <rect
+                    key={`vol-${pt.key}`}
+                    x={pt.x - barWidth / 2}
+                    y={bottomY - pt.volumeBarHeight}
+                    width={barWidth}
+                    height={pt.volumeBarHeight}
+                    rx={1.5}
+                    className={
+                      isSelected
+                        ? 'fill-amber-500/35 stroke-amber-400/50'
+                        : 'fill-slate-800/65 hover:fill-slate-700/70'
+                    }
+                  />
+                );
+              })}
+
+              {/* Overall Profile Mean Horizontal Reference Line */}
+              {trendChartGeometry.meanY !== null && (
+                <g>
+                  <line
+                    x1={trendChartGeometry.padLeft}
+                    y1={trendChartGeometry.meanY}
+                    x2={trendChartGeometry.width - trendChartGeometry.padRight}
+                    y2={trendChartGeometry.meanY}
+                    stroke="#10b981"
+                    strokeOpacity="0.65"
+                    strokeDasharray="5 4"
+                    strokeWidth="1.25"
+                  />
+                  <rect
+                    x={trendChartGeometry.width - trendChartGeometry.padRight - 92}
+                    y={trendChartGeometry.meanY - 17}
+                    width="88"
+                    height="15"
+                    rx="3"
+                    fill="#020617"
+                    stroke="#10b981"
+                    strokeOpacity="0.4"
+                  />
+                  <text
+                    x={trendChartGeometry.width - trendChartGeometry.padRight - 48}
+                    y={trendChartGeometry.meanY - 6.5}
+                    textAnchor="middle"
+                    className="fill-emerald-300 text-[9.5px] font-mono tabular-nums"
+                  >
+                    Mean {stats.meanRating.toFixed(2)}★
+                  </text>
+                </g>
+              )}
+
+              {/* Shaded Area under Primary Trend Line */}
+              {trendChartGeometry.areaPath && (
+                <path d={trendChartGeometry.areaPath} fill="url(#tasteEvolutionAreaGrad)" />
+              )}
+
+              {/* Full Account Baseline Reference Path when Subset Cohort is Active */}
+              {isSubsetActive &&
+                releaseTrendResolution === 'decade' &&
+                trendChartGeometry.baselinePath && (
+                  <path
+                    d={trendChartGeometry.baselinePath}
+                    fill="none"
+                    stroke="#38bdf8"
+                    strokeWidth="1.75"
+                    strokeDasharray="4 4"
+                    strokeOpacity="0.8"
+                  />
+                )}
+
+              {/* In Year mode: subtle raw year-to-year line + bold 5-year rolling average line */}
+              {releaseTrendResolution === 'year' ? (
+                <>
+                  <path
+                    d={trendChartGeometry.linePath}
+                    fill="none"
+                    stroke="#38bdf8"
+                    strokeWidth="1.2"
+                    strokeOpacity="0.45"
+                  />
+                  <path
+                    d={trendChartGeometry.rollingPath}
+                    fill="none"
+                    stroke="#f59e0b"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : (
+                <path
+                  d={trendChartGeometry.linePath}
+                  fill="none"
+                  stroke="#f59e0b"
+                  strokeWidth="2.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              )}
+
+              {/* Interactive Data Nodes & X-Axis Labels */}
+              {trendChartGeometry.points.map((pt, idx) => {
+                const isSelected =
+                  selectedReleaseEraBucket?.type === pt.type &&
+                  selectedReleaseEraBucket?.value === pt.numericValue;
+                const isHovered = hoveredTrendKey === pt.key;
+                const showXLabel =
+                  releaseTrendResolution === 'decade' ||
+                  trendChartGeometry.points.length <= 18 ||
+                  idx === 0 ||
+                  idx === trendChartGeometry.points.length - 1 ||
+                  pt.numericValue % 10 === 0 ||
+                  idx % Math.ceil(trendChartGeometry.points.length / 12) === 0;
+
+                return (
+                  <g
+                    key={pt.key}
+                    className="cursor-pointer"
+                    onMouseEnter={() => setHoveredTrendKey(pt.key)}
+                    onMouseLeave={() => setHoveredTrendKey(null)}
+                    onClick={() => {
+                      setSelectedRatingBucket(null);
+                      setSelectedPeriodBucket(null);
+                      setSelectedReleaseEraBucket((prev) =>
+                        prev && prev.type === pt.type && prev.value === pt.numericValue
+                          ? null
+                          : {
+                              type: pt.type,
+                              label: pt.label,
+                              value: pt.numericValue,
+                            }
+                      );
+                    }}
+                  >
+                    {/* Vertical hover/selection guide */}
+                    {(isHovered || isSelected) && (
+                      <line
+                        x1={pt.x}
+                        y1={trendChartGeometry.padTop}
+                        x2={pt.x}
+                        y2={trendChartGeometry.padTop + trendChartGeometry.plotHeight}
+                        stroke="#f59e0b"
+                        strokeOpacity="0.4"
+                        strokeDasharray="2 2"
+                        strokeWidth="1"
+                      />
+                    )}
+
+                    {/* Invisible larger hit target for easy clicking/hovering */}
+                    <circle cx={pt.x} cy={pt.y} r={12} fill="transparent" />
+
+                    {/* Visible Point Circle */}
+                    <circle
+                      cx={pt.x}
+                      cy={pt.y}
+                      r={
+                        isSelected || isHovered
+                          ? 6
+                          : releaseTrendResolution === 'decade'
+                          ? 4.5
+                          : 3
+                      }
+                      className={
+                        isSelected
+                          ? 'fill-amber-300 stroke-slate-950'
+                          : isHovered
+                          ? 'fill-amber-400 stroke-slate-950'
+                          : releaseTrendResolution === 'decade'
+                          ? 'fill-amber-400 stroke-slate-950'
+                          : 'fill-sky-400 stroke-slate-950'
+                      }
+                      strokeWidth="1.5"
+                    />
+
+                    {/* Value Badge above node in Decade mode or when Hovered/Selected */}
+                    {(releaseTrendResolution === 'decade' || isHovered || isSelected) && (
+                      <text
+                        x={pt.x}
+                        y={Math.max(12, pt.y - 10)}
+                        textAnchor="middle"
+                        className={`text-[10px] font-mono tabular-nums ${
+                          isSelected || isHovered
+                            ? 'fill-amber-300 font-bold'
+                            : 'fill-slate-200 font-medium'
+                        }`}
+                      >
+                        {pt.avgRating.toFixed(2)}★
+                      </text>
+                    )}
+
+                    {/* X-Axis Era / Year Label */}
+                    {showXLabel && (
+                      <text
+                        x={pt.x}
+                        y={trendChartGeometry.padTop + trendChartGeometry.plotHeight + 18}
+                        textAnchor="middle"
+                        className={`text-[10px] font-mono tabular-nums ${
+                          isSelected || isHovered
+                            ? 'fill-amber-400 font-bold'
+                            : 'fill-slate-400'
+                        }`}
+                      >
+                        {pt.label}
+                      </text>
+                    )}
+
+                    {/* Sub-label for rated film count in Decade mode */}
+                    {releaseTrendResolution === 'decade' && (
+                      <text
+                        x={pt.x}
+                        y={trendChartGeometry.padTop + trendChartGeometry.plotHeight + 31}
+                        textAnchor="middle"
+                        className="fill-slate-500 text-[9px] font-mono tabular-nums"
+                      >
+                        n={pt.ratedCount}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        )}
+      </div>
+
       {/* Paginated Drilldown Tray */}
-      {(selectedRatingBucket !== null || selectedPeriodBucket !== null) && (
+      {(selectedRatingBucket !== null ||
+        selectedPeriodBucket !== null ||
+        selectedReleaseEraBucket !== null) && (
         <div className="bg-slate-900 border border-amber-500/40 rounded-lg p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -1032,7 +2001,9 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                   ? `Films Rated ${selectedRatingBucket.toFixed(1)} ★ (${formatStarGlyphs(
                       selectedRatingBucket
                     )}) — ${bucketFilteredFilms.length.toLocaleString()} matching entries`
-                  : `Films Logged in ${selectedPeriodBucket} — ${bucketFilteredFilms.length.toLocaleString()} matching entries`}
+                  : selectedPeriodBucket !== null
+                  ? `Films Logged in ${selectedPeriodBucket} — ${bucketFilteredFilms.length.toLocaleString()} matching entries`
+                  : `Films Released in ${selectedReleaseEraBucket?.label} — ${bucketFilteredFilms.length.toLocaleString()} matching entries`}
               </h4>
             </div>
 
@@ -1056,6 +2027,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                 onClick={() => {
                   setSelectedRatingBucket(null);
                   setSelectedPeriodBucket(null);
+                  setSelectedReleaseEraBucket(null);
                 }}
                 className="text-xs text-slate-400 hover:text-slate-200 whitespace-nowrap"
               >
@@ -1072,12 +2044,17 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
                 {paginatedTrayFilms.map((f) => (
-                  <div
+                  <button
                     key={f.id}
-                    className="p-2.5 bg-slate-950 border border-slate-800 rounded flex items-center justify-between gap-2 text-xs"
+                    type="button"
+                    onClick={() => onInspectFilm && onInspectFilm(f)}
+                    className="p-2.5 bg-slate-950 hover:bg-slate-900 border border-slate-800 hover:border-amber-500/40 rounded flex items-center justify-between gap-2 text-xs text-left transition-colors cursor-pointer group"
+                    title="Click to open unified Film Dossier, Credits & Oscar Ballot history"
                   >
                     <div className="truncate">
-                      <div className="font-medium text-slate-100 truncate">{f.title}</div>
+                      <div className="font-medium text-slate-100 group-hover:text-amber-300 truncate transition-colors">
+                        {f.title}
+                      </div>
                       <div className="text-slate-500 font-mono tabular-nums truncate">
                         {f.year} · {f.director}
                       </div>
@@ -1085,7 +2062,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                     <div className="font-mono tabular-nums text-amber-400 shrink-0">
                       {f.rating !== null ? `${f.rating.toFixed(1)}★` : '—'}
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
 
@@ -1142,7 +2119,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
             Frequency of genres logged alongside how much higher or lower you rate each genre relative to your overall average.
           </p>
 
-          <div className="overflow-x-auto">
+          <div>
             <table className="w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="border-b border-slate-800 text-[11px] text-slate-400">
@@ -1195,27 +2172,61 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
               Viewing by Release Decade
             </h3>
             <p className="text-xs text-slate-400 mb-4">
-              Film count and average star rating across cinematic eras.
+              Film count and average star rating across cinematic eras. Click any decade to inspect its films.
             </p>
-            <div className="space-y-2.5">
+            <div className="space-y-2">
               {stats.decades.map((d) => {
                 const widthPct = Math.round((d.count / stats.maxDecadeCount) * 100);
+                const isSelected =
+                  selectedReleaseEraBucket?.type === 'decade' &&
+                  selectedReleaseEraBucket?.value === d.decadeNum;
                 return (
-                  <div key={d.decade} className="space-y-1">
+                  <button
+                    key={d.decade}
+                    type="button"
+                    onClick={() => {
+                      setSelectedRatingBucket(null);
+                      setSelectedPeriodBucket(null);
+                      setSelectedReleaseEraBucket((prev) =>
+                        prev && prev.type === 'decade' && prev.value === d.decadeNum
+                          ? null
+                          : { type: 'decade', label: d.decade, value: d.decadeNum }
+                      );
+                    }}
+                    className={`w-full text-left p-1.5 rounded transition-colors space-y-1 ${
+                      isSelected ? 'bg-amber-500/15 ring-1 ring-amber-500/40' : 'hover:bg-slate-800/40'
+                    }`}
+                  >
                     <div className="flex items-center justify-between text-xs font-mono tabular-nums">
                       <span className="text-slate-200 font-medium">{d.decade}</span>
                       <span className="text-slate-400">
                         {d.count.toLocaleString()} films ·{' '}
                         <strong className="text-amber-400">{d.avgRating.toFixed(2)} ★</strong>
+                        {d.ratedCount > 0 && (
+                          <span
+                            className={`ml-1.5 text-[11px] ${
+                              d.biasVsMean >= 0.05
+                                ? 'text-emerald-400'
+                                : d.biasVsMean <= -0.05
+                                ? 'text-rose-400'
+                                : 'text-slate-500'
+                            }`}
+                          >
+                            ({d.biasVsMean >= 0 ? '+' : ''}
+                            {d.biasVsMean.toFixed(2)}★)
+                          </span>
+                        )}
                       </span>
                     </div>
                     <div className="w-full h-2 bg-slate-950 rounded overflow-hidden">
                       <div
                         style={{ width: `${widthPct}%` }}
-                        className="h-full bg-sky-500/80 rounded"
+                        className={`h-full rounded ${
+                          isSelected ? 'bg-amber-400' : 'bg-sky-500/80'
+                        }`}
                       />
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -1247,6 +2258,8 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
           </div>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 };

@@ -22,6 +22,7 @@ interface ChangesSummaryViewProps {
   profile: ProfileAccount;
   onUpdateFilms: (films: FilmEntry[]) => void;
   onOpenInSpreadsheet: (filmId?: string) => void;
+  onInspectFilmModal?: (film: FilmEntry) => void;
 }
 
 type DeviationCategoryFilter =
@@ -68,6 +69,7 @@ export const ChangesSummaryView: React.FC<ChangesSummaryViewProps> = ({
   profile,
   onUpdateFilms,
   onOpenInSpreadsheet,
+  onInspectFilmModal,
 }) => {
   const [categoryFilter, setCategoryFilter] =
     useState<DeviationCategoryFilter>('all');
@@ -470,14 +472,26 @@ export const ChangesSummaryView: React.FC<ChangesSummaryViewProps> = ({
                     )}
 
                     {rec.status !== 'removed_in_app' && (
-                      <button
-                        type="button"
-                        onClick={() => onOpenInSpreadsheet(rec.filmId)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-200 hover:text-amber-300 bg-slate-900 border border-slate-800 rounded transition-colors"
-                      >
-                        <Table2 className="w-3 h-3 text-amber-400" />
-                        <span>Inspect in Sheet</span>
-                      </button>
+                      <>
+                        {onInspectFilmModal && filmObj && (
+                          <button
+                            type="button"
+                            onClick={() => onInspectFilmModal(filmObj)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-200 hover:text-amber-300 bg-slate-900 border border-slate-800 rounded transition-colors cursor-pointer"
+                          >
+                            <FileText className="w-3 h-3 text-amber-400" />
+                            <span>Open Dossier</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => onOpenInSpreadsheet(rec.filmId)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-200 hover:text-amber-300 bg-slate-900 border border-slate-800 rounded transition-colors cursor-pointer"
+                        >
+                          <Table2 className="w-3 h-3 text-amber-400" />
+                          <span>Inspect in Sheet</span>
+                        </button>
+                      </>
                     )}
 
                     <button

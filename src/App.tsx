@@ -30,14 +30,17 @@ import {
 import {
   FilmEntry,
   ProfileAccount,
+  TierGrade,
 } from './types/letterboxd';
 import { createInitialSeedArchive } from './data/seedArchive';
 import { INITIAL_PROFILES } from './data/filmCatalog';
 import { getCategoriesForYear } from './data/oscarHistoryEngine';
-import { makeFilmId } from './utils/letterboxdCsvParser';
+import { ingestLetterboxdCsvFiles, makeFilmId } from './utils/letterboxdCsvParser';
 import { computeProfileDeviations } from './utils/baselineDiff';
 import {
   filmEntryToFilmRecord,
+  normalizeFilmMatchKey,
+  propagateMetadataAcrossAllProfiles,
   syncArchiveIntoProfile,
   syncProfileFilmsIntoArchive,
 } from './utils/unifiedArchiveSync';
@@ -52,7 +55,6 @@ import { SpreadsheetView } from './components/SpreadsheetView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { RecommendationsView } from './components/RecommendationsView';
 import { ComparisonView } from './components/ComparisonView';
-import { ExternalListsView } from './components/ExternalListsView';
 import { DataSourcesView } from './components/DataSourcesView';
 import { ChangesSummaryView } from './components/ChangesSummaryView';
 import { FilmGroupCohort } from './components/GroupHistogramPanel';
@@ -65,7 +67,6 @@ export type UnifiedNavTab =
   | 'analytics'
   | 'recommendations'
   | 'compare'
-  | 'awards_lists'
   | 'lists'
   | 'sources'
   | 'changes';
@@ -94,18 +95,38 @@ export default function App() {
 
   // 1. Cineaste Ledger Archive State (Catalog, Yearly Rankings 1927-2026, Oscar Ballots 1927-2026, Curated Lists)
   const [archive, setArchive] = useState<CineasteArchiveState>(() => {
+    const seed = createInitialSeedArchive();
+    const seededWithProfile = INITIAL_PROFILES[0]
+      ? syncProfileFilmsIntoArchive(INITIAL_PROFILES[0].films, seed)
+      : seed;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as CineasteArchiveState;
         if (parsed && parsed.films && Object.keys(parsed.films).length > 0) {
-          return parsed;
+          const mergedArchive: CineasteArchiveState = {
+            ...seededWithProfile,
+            ...parsed,
+            films: {
+              ...seededWithProfile.films,
+              ...parsed.films,
+            },
+            yearlyRankings: {
+              ...seededWithProfile.yearlyRankings,
+              ...(parsed.yearlyRankings || {}),
+            },
+            oscarBallots: {
+              ...seededWithProfile.oscarBallots,
+              ...(parsed.oscarBallots || {}),
+            },
+          };
+          return mergedArchive;
         }
       }
     } catch {
       // Fallback to seed archive
     }
-    return createInitialSeedArchive();
+    return seededWithProfile;
   });
 
   // 2. FrameSheet Multi-Profile State (Synchronized with Cineaste Ledger Archive)
@@ -115,16 +136,18 @@ export default function App() {
       if (raw) {
         const parsed = JSON.parse(raw) as ProfileAccount[];
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map((p, idx) =>
-            idx === 0 ? syncArchiveIntoProfile(archive, p) : p
+          return propagateMetadataAcrossAllProfiles(
+            archive,
+            parsed.map((p, idx) => (idx === 0 ? syncArchiveIntoProfile(archive, p) : p))
           );
         }
       }
     } catch {
       // Fallback to initial profiles synced with archive
     }
-    return INITIAL_PROFILES.map((p, idx) =>
-      idx === 0 ? syncArchiveIntoProfile(archive, p) : p
+    return propagateMetadataAcrossAllProfiles(
+      archive,
+      INITIAL_PROFILES.map((p, idx) => (idx === 0 ? syncArchiveIntoProfile(archive, p) : p))
     );
   });
 
@@ -159,14 +182,17 @@ export default function App() {
     [profiles, activeProfileId]
   );
 
-  // Unified setter: when Cineaste Archive updates (e.g. Catalog, Rankings, Ballots, CSV modal), sync into active Profile
+  // Unified setter: when Cineaste Archive updates, sync into active Profile and propagate enriched posters/credits across all profiles
   const updateUnifiedArchive = useCallback(
     (updater: CineasteArchiveState | ((prev: CineasteArchiveState) => CineasteArchiveState)) => {
       setArchive((prev) => {
         const nextArchive = typeof updater === 'function' ? updater(prev) : updater;
         setProfiles((prevProfiles) =>
-          prevProfiles.map((p) =>
-            p.id === activeProfileId ? syncArchiveIntoProfile(nextArchive, p) : p
+          propagateMetadataAcrossAllProfiles(
+            nextArchive,
+            prevProfiles.map((p) =>
+              p.id === activeProfileId ? syncArchiveIntoProfile(nextArchive, p) : p
+            )
           )
         );
         return nextArchive;
@@ -181,7 +207,7 @@ export default function App() {
       setProfiles((prevProfiles) =>
         prevProfiles.map((p) => (p.id === activeProfile.id ? { ...p, films: nextFilms } : p))
       );
-      setArchive((prevArchive) => syncProfileFilmsIntoArchive(nextFilms, prevArchive));
+      setArchive((prevArchive) => syncProfileFilmsIntoArchive(nextFilms, prevArchive, true));
     },
     [activeProfile.id]
   );
@@ -202,14 +228,16 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<UnifiedNavTab>('catalog');
   const [selectedYear, setSelectedYear] = useState<number>(1975);
 
-  // Catalog Filters
+  // Catalog Filters (combining Cineaste Ledger + FrameSheet Tier & Watchlist filters)
   const [catalogViewMode, setCatalogViewMode] = useState<'grid' | 'table'>('grid');
   const [searchQuery, setSearchQuery] = useState('');
   const [decadeFilter, setDecadeFilter] = useState<string>('all');
   const [minRatingFilter, setMinRatingFilter] = useState<number>(0);
   const [oscarFilter, setOscarFilter] = useState<'all' | 'nominated' | 'winner'>('all');
+  const [tierFilter, setTierFilter] = useState<'all' | TierGrade>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'logged' | 'watchlist' | 'modified'>('all');
   const [listFilter, setListFilter] = useState<string>('all');
-  const [sortBy, setSortBy] = useState<'year-desc' | 'year-asc' | 'rating-desc' | 'title-asc'>(
+  const [sortBy, setSortBy] = useState<'year-desc' | 'year-asc' | 'rating-desc' | 'title-asc' | 'sheet-rank'>(
     'rating-desc'
   );
 
@@ -232,7 +260,7 @@ export default function App() {
     total: number;
   }>({ active: false, done: 0, total: 0 });
 
-  // Single Film Enrichment via Express Proxy (/api/metadata/enrich)
+  // Single Film Enrichment via Express Proxy (/api/metadata/enrich?extended=true)
   const enrichSingleFilm = useCallback(
     async (filmId: string) => {
       const targetFilm = archive.films[filmId];
@@ -240,7 +268,7 @@ export default function App() {
 
       try {
         const res = await fetch(
-          `/api/metadata/enrich?title=${encodeURIComponent(targetFilm.title)}&year=${targetFilm.year}`
+          `/api/metadata/enrich?title=${encodeURIComponent(targetFilm.title)}&year=${targetFilm.year}&extended=true`
         );
         if (!res.ok) return;
         const data = await res.json();
@@ -289,7 +317,7 @@ export default function App() {
     [archive.films, updateUnifiedArchive]
   );
 
-  // Batch Enrichment for Missing Posters
+  // Deduplicated Batch Enrichment via POST /api/metadata/enrich-batch
   const triggerBatchEnrich = useCallback(
     async (onlyMissingPosters: boolean) => {
       const allFilms = Object.values(archive.films) as FilmRecord[];
@@ -301,51 +329,66 @@ export default function App() {
 
       setEnrichmentProgress({ active: true, done: 0, total: queue.length });
 
-      for (let i = 0; i < queue.length; i++) {
-        const film = queue[i];
+      const CHUNK_SIZE = 12;
+      let processedCount = 0;
+
+      for (let i = 0; i < queue.length; i += CHUNK_SIZE) {
+        const chunk = queue.slice(i, i + CHUNK_SIZE);
         try {
-          const res = await fetch(
-            `/api/metadata/enrich?title=${encodeURIComponent(film.title)}&year=${film.year}`
-          );
+          const res = await fetch('/api/metadata/enrich-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              items: chunk.map((f) => ({ id: f.id, title: f.title, year: f.year })),
+              includeExtendedCredits: !onlyMissingPosters,
+            }),
+          });
           if (res.ok) {
-            const data = await res.json();
+            const payload = await res.json();
+            const resultsMap: Record<string, any> = payload?.results || {};
+
             updateUnifiedArchive((prev) => {
-              const curr = prev.films[film.id];
-              if (!curr) return prev;
-              return {
-                ...prev,
-                films: {
-                  ...prev.films,
-                  [film.id]: {
-                    ...curr,
-                    metadata: {
-                      ...curr.metadata,
-                      posterUrl: data.posterUrl || curr.metadata?.posterUrl,
-                      imdbId: data.imdbId || curr.metadata?.imdbId,
-                      director: curr.metadata?.director || data.director,
-                      cast:
-                        curr.metadata?.cast && curr.metadata.cast.length > 0
-                          ? curr.metadata.cast
-                          : data.cast,
-                      writers:
-                        curr.metadata?.writers && curr.metadata.writers.length > 0
-                          ? curr.metadata.writers
-                          : data.writers,
-                      cinematographer: curr.metadata?.cinematographer || data.cinematographer,
-                      composer: curr.metadata?.composer || data.composer,
-                      editor: curr.metadata?.editor || data.editor,
-                      country: curr.metadata?.country || data.country,
-                      enriched: true,
-                    },
+              const nextFilms = { ...prev.films };
+              for (const film of chunk) {
+                const curr = nextFilms[film.id];
+                const data = resultsMap[film.id];
+                if (!curr || !data) continue;
+                nextFilms[film.id] = {
+                  ...curr,
+                  metadata: {
+                    ...curr.metadata,
+                    posterUrl: data.posterUrl || curr.metadata?.posterUrl,
+                    imdbId: data.imdbId || curr.metadata?.imdbId,
+                    director: curr.metadata?.director || data.director,
+                    cast:
+                      curr.metadata?.cast && curr.metadata.cast.length > 0
+                        ? curr.metadata.cast
+                        : data.cast,
+                    writers:
+                      curr.metadata?.writers && curr.metadata.writers.length > 0
+                        ? curr.metadata.writers
+                        : data.writers,
+                    cinematographer: curr.metadata?.cinematographer || data.cinematographer,
+                    composer: curr.metadata?.composer || data.composer,
+                    editor: curr.metadata?.editor || data.editor,
+                    country: curr.metadata?.country || data.country,
+                    runtime: curr.metadata?.runtime || data.runtime,
+                    genres:
+                      curr.metadata?.genres && curr.metadata.genres.length > 0
+                        ? curr.metadata.genres
+                        : data.genres,
+                    enriched: true,
                   },
-                },
-              };
+                };
+              }
+              return { ...prev, films: nextFilms };
             });
           }
         } catch {
-          // Continue with next film
+          // Continue with next batch chunk
         }
-        setEnrichmentProgress({ active: true, done: i + 1, total: queue.length });
+        processedCount = Math.min(queue.length, i + chunk.length);
+        setEnrichmentProgress({ active: true, done: processedCount, total: queue.length });
       }
 
       setEnrichmentProgress((prev) => ({ ...prev, active: false }));
@@ -407,6 +450,57 @@ export default function App() {
     return map;
   }, [archive.yearlyRankings]);
 
+  // Unified Title::Year Lookups for SpreadsheetView, YearlyRankingsView, and ListsAndReviewsView
+  const yearRankByTitleYear = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const [filmId, rank] of Object.entries(yearRankByFilmId) as Array<[string, number]>) {
+      map.set(filmId, rank);
+      const film = archive.films[filmId];
+      if (film) {
+        map.set(normalizeFilmMatchKey(film.title, film.year), rank);
+      }
+    }
+    return map;
+  }, [yearRankByFilmId, archive.films]);
+
+  const personalOscarByTitleYear = useMemo(() => {
+    const map = new Map<string, { nominations: string[]; wins: string[] }>();
+    for (const [filmId, stats] of Object.entries(oscarStatsByFilmId) as Array<
+      [string, { nominations: string[]; wins: string[] }]
+    >) {
+      map.set(filmId, stats);
+      const film = archive.films[filmId];
+      if (film) {
+        map.set(normalizeFilmMatchKey(film.title, film.year), stats);
+      }
+    }
+    return map;
+  }, [oscarStatsByFilmId, archive.films]);
+
+  // Active Profile FrameSheet Entry Lookups (Tier, Global Rank, Watchlist, Baseline Diff)
+  const profileEntryByKey = useMemo(() => {
+    const map = new Map<string, FilmEntry>();
+    for (const entry of activeProfile.films) {
+      map.set(entry.id, entry);
+      map.set(normalizeFilmMatchKey(entry.title, entry.year), entry);
+    }
+    return map;
+  }, [activeProfile.films]);
+
+  const baselineEntryByKey = useMemo(() => {
+    const map = new Map<string, FilmEntry>();
+    for (const entry of activeProfile.baselineFilms || []) {
+      map.set(entry.id, entry);
+      map.set(normalizeFilmMatchKey(entry.title, entry.year), entry);
+    }
+    return map;
+  }, [activeProfile.baselineFilms]);
+
+  const deviationsSummary = useMemo(
+    () => computeProfileDeviations(activeProfile.baselineFilms, activeProfile.films),
+    [activeProfile.baselineFilms, activeProfile.films]
+  );
+
   // Filtered & Sorted Films for Catalog View
   const filteredFilms = useMemo(() => {
     const all = Object.values(archive.films) as FilmRecord[];
@@ -414,12 +508,19 @@ export default function App() {
 
     return all
       .filter((film) => {
+        const pfEntry =
+          profileEntryByKey.get(film.id) ||
+          profileEntryByKey.get(normalizeFilmMatchKey(film.title, film.year));
+
         if (q) {
           const matchTitle = film.title.toLowerCase().includes(q);
           const matchDir = film.metadata?.director?.toLowerCase().includes(q);
           const matchCast = film.metadata?.cast?.some((c) => c.toLowerCase().includes(q));
+          const matchGenre = (pfEntry?.genres || film.metadata?.genres || []).some((g) =>
+            g.toLowerCase().includes(q)
+          );
           const matchYear = String(film.year).includes(q);
-          if (!matchTitle && !matchDir && !matchCast && !matchYear) return false;
+          if (!matchTitle && !matchDir && !matchCast && !matchGenre && !matchYear) return false;
         }
 
         if (decadeFilter !== 'all') {
@@ -431,8 +532,23 @@ export default function App() {
           if ((film.rating || 0) < minRatingFilter) return false;
         }
 
+        if (tierFilter !== 'all') {
+          if (pfEntry?.tier !== tierFilter) return false;
+        }
+
+        if (statusFilter !== 'all') {
+          if (statusFilter === 'watchlist' && !pfEntry?.watchlist) return false;
+          if (statusFilter === 'logged' && pfEntry?.watchlist) return false;
+          if (statusFilter === 'modified') {
+            const isMod = pfEntry ? deviationsSummary.byFilmId.has(pfEntry.id) : false;
+            if (!isMod) return false;
+          }
+        }
+
         if (oscarFilter !== 'all') {
-          const stats = oscarStatsByFilmId[film.id];
+          const stats =
+            oscarStatsByFilmId[film.id] ||
+            personalOscarByTitleYear.get(normalizeFilmMatchKey(film.title, film.year));
           if (oscarFilter === 'nominated' && (!stats || stats.nominations.length === 0)) {
             return false;
           }
@@ -451,6 +567,17 @@ export default function App() {
         return true;
       })
       .sort((a, b) => {
+        if (sortBy === 'sheet-rank') {
+          const rA =
+            profileEntryByKey.get(a.id)?.customRank ??
+            profileEntryByKey.get(normalizeFilmMatchKey(a.title, a.year))?.customRank ??
+            99999;
+          const rB =
+            profileEntryByKey.get(b.id)?.customRank ??
+            profileEntryByKey.get(normalizeFilmMatchKey(b.title, b.year))?.customRank ??
+            99999;
+          return rA - rB || (b.rating || 0) - (a.rating || 0);
+        }
         if (sortBy === 'year-desc') return b.year - a.year || (b.rating || 0) - (a.rating || 0);
         if (sortBy === 'year-asc') return a.year - b.year || (b.rating || 0) - (a.rating || 0);
         if (sortBy === 'title-asc') return a.title.localeCompare(b.title);
@@ -460,12 +587,17 @@ export default function App() {
     archive.films,
     archive.lists,
     decadeFilter,
+    deviationsSummary.byFilmId,
     listFilter,
     minRatingFilter,
     oscarFilter,
     oscarStatsByFilmId,
+    personalOscarByTitleYear,
+    profileEntryByKey,
     searchQuery,
     sortBy,
+    statusFilter,
+    tierFilter,
   ]);
 
   const handleQuickAddFilmFromImdb = async (
@@ -569,10 +701,10 @@ export default function App() {
     (newProfile: ProfileAccount, setAsActive: boolean) => {
       setProfiles((prev) => {
         const exists = prev.some((p) => p.id === newProfile.id);
-        if (exists) {
-          return prev.map((p) => (p.id === newProfile.id ? newProfile : p));
-        }
-        return [newProfile, ...prev];
+        const updatedList = exists
+          ? prev.map((p) => (p.id === newProfile.id ? newProfile : p))
+          : [newProfile, ...prev];
+        return propagateMetadataAcrossAllProfiles(archive, updatedList);
       });
       if (setAsActive) {
         setActiveProfileId(newProfile.id);
@@ -580,7 +712,7 @@ export default function App() {
         setActiveTab('spreadsheet');
       }
     },
-    []
+    [archive]
   );
 
   const handleDeleteProfile = useCallback(
@@ -630,17 +762,27 @@ export default function App() {
     (b: YearlyOscarBallot) => Object.keys(b.categories || {}).length > 0
   ).length;
 
-  const deviationsSummary = useMemo(
-    () => computeProfileDeviations(activeProfile.baselineFilms, activeProfile.films),
-    [activeProfile.baselineFilms, activeProfile.films]
-  );
-
   const activeModalFilm = selectedFilmIdForModal ? archive.films[selectedFilmIdForModal] : null;
+  const activeModalProfileEntry = useMemo(() => {
+    if (!activeModalFilm) return undefined;
+    return (
+      profileEntryByKey.get(activeModalFilm.id) ||
+      profileEntryByKey.get(normalizeFilmMatchKey(activeModalFilm.title, activeModalFilm.year))
+    );
+  }, [activeModalFilm, profileEntryByKey]);
+
+  const activeModalBaselineEntry = useMemo(() => {
+    if (!activeModalFilm) return undefined;
+    return (
+      baselineEntryByKey.get(activeModalFilm.id) ||
+      baselineEntryByKey.get(normalizeFilmMatchKey(activeModalFilm.title, activeModalFilm.year))
+    );
+  }, [activeModalFilm, baselineEntryByKey]);
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FBF9F5] dark:bg-[#0C0C0E] text-[#181615] dark:text-[#F4F1EA] transition-colors">
       {/* STRICT 3-ZONE TOP BAR CONTRACT */}
-      <header className="sticky top-0 z-40 flex items-center justify-between gap-8 px-6 lg:px-10 py-4 bg-[#FBF9F5]/95 dark:bg-[#0C0C0E]/95 backdrop-blur border-b border-[#DED9CE] dark:border-[#262830]">
+      <header className="sticky top-0 z-40 flex flex-wrap items-center justify-between gap-4 px-6 lg:px-10 py-3.5 bg-[#FBF9F5]/95 dark:bg-[#0C0C0E]/95 backdrop-blur border-b border-[#DED9CE] dark:border-[#262830]">
         {/* Zone 1: Brand Wordmark (Single Text Element) */}
         <a
           href="#top"
@@ -650,11 +792,14 @@ export default function App() {
           }}
           className="text-xl sm:text-2xl font-editorial font-semibold tracking-tight text-[#181615] dark:text-[#F4F1EA] whitespace-nowrap shrink-0"
         >
-          Cineaste Ledger <span className="text-[#9A7B1C] dark:text-[#D4AF37] font-normal">×</span> FrameSheet
+          PMDB <span className="text-[#9A7B1C] dark:text-[#D4AF37] font-normal">·</span>{' '}
+          <span className="text-sm sm:text-base font-normal text-[#6E6A63] dark:text-[#9A9891]">
+            The Personal Movie Database
+          </span>
         </a>
 
         {/* Zone 2: 5 Primary Single-Line Navigation Links */}
-        <nav className="flex items-center gap-5 sm:gap-7 text-xs sm:text-sm font-medium text-[#6E6A63] dark:text-[#9A9891] overflow-x-auto">
+        <nav className="flex flex-wrap items-center justify-center gap-x-4 sm:gap-x-6 gap-y-1.5 text-xs sm:text-sm font-medium text-[#6E6A63] dark:text-[#9A9891]">
           <button
             type="button"
             onClick={() => setActiveTab('catalog')}
@@ -697,13 +842,13 @@ export default function App() {
                 : 'border-transparent hover:text-[#181615] dark:hover:text-[#F4F1EA]'
             }`}
           >
-            Academy Ballots
+            Oscars & Industry Awards
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('analytics')}
             className={`py-1 border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-              ['analytics', 'recommendations', 'compare', 'awards_lists', 'lists', 'sources', 'changes'].includes(activeTab)
+              ['analytics', 'recommendations', 'compare', 'lists', 'sources', 'changes'].includes(activeTab)
                 ? 'border-[#9A7B1C] dark:border-[#D4AF37] text-[#181615] dark:text-[#F4F1EA] font-semibold'
                 : 'border-transparent hover:text-[#181615] dark:hover:text-[#F4F1EA]'
             }`}
@@ -806,9 +951,9 @@ export default function App() {
             </div>
           </div>
 
-          {/* Bottom Row: Full Unified Studio Module Switcher (Cineaste Ledger + FrameSheet) */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
-            <span className="text-[10px] font-mono-tabular uppercase tracking-wider text-[#6E6A63] dark:text-[#9A9891] pr-2 whitespace-nowrap shrink-0">
+          {/* Bottom Row: Full Unified Studio Module Switcher (Wrapped so no horizontal scrollbar is needed) */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-mono-tabular uppercase tracking-wider text-[#6E6A63] dark:text-[#9A9891] pr-1.5 whitespace-nowrap shrink-0">
               Workspaces:
             </span>
 
@@ -860,8 +1005,8 @@ export default function App() {
                   : 'text-[#6E6A63] dark:text-[#9A9891] hover:text-[#181615] dark:hover:text-[#F4F1EA] hover:bg-[#EBE6DF] dark:hover:bg-[#1C1E24]'
               }`}
             >
-              <Award className="w-3.5 h-3.5" />
-              <span>Personal Oscars (1927–2026)</span>
+              <Trophy className="w-3.5 h-3.5" />
+              <span>Oscars & Industry Awards</span>
             </button>
 
             <button
@@ -901,19 +1046,6 @@ export default function App() {
             >
               <GitCompare className="w-3.5 h-3.5" />
               <span>Compare Profiles</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('awards_lists')}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                activeTab === 'awards_lists'
-                  ? 'bg-[#9A7B1C] dark:bg-[#D4AF37] text-white dark:text-[#0C0C0E] font-semibold'
-                  : 'text-[#6E6A63] dark:text-[#9A9891] hover:text-[#181615] dark:hover:text-[#F4F1EA] hover:bg-[#EBE6DF] dark:hover:bg-[#1C1E24]'
-              }`}
-            >
-              <Trophy className="w-3.5 h-3.5" />
-              <span>Industry Awards & Polls</span>
             </button>
 
             <button
@@ -971,7 +1103,7 @@ export default function App() {
                   Log Any Film from Public IMDb & Wikipedia Index (1927–2026)
                 </h3>
                 <p className="text-xs text-[#6E6A63] dark:text-[#9A9891]">
-                  Automatically fetches theatrical poster, director, cast, screenwriters, cinematographer, and composer — and syncs across both Cineaste Ledger and FrameSheet.
+                  Automatically fetches theatrical poster, director, cast, screenwriters, cinematographer, and composer — and syncs across your entire PMDB workspace.
                 </p>
               </div>
               <button
@@ -1046,7 +1178,7 @@ export default function App() {
                 <div className="lg:col-span-7 p-6 sm:p-8 flex flex-col justify-between space-y-6">
                   <div className="space-y-3">
                     <p className="text-xs font-mono-tabular uppercase tracking-widest text-[#9A7B1C] dark:text-[#D4AF37]">
-                      Unified Cinema Suite · Cineaste Ledger × FrameSheet
+                      PMDB · The Personal Movie Database
                     </p>
                     <h1
                       className="text-3xl sm:text-5xl font-editorial font-semibold text-[#181615] dark:text-[#F4F1EA] leading-[1.1]"
@@ -1055,7 +1187,7 @@ export default function App() {
                       Every Film You’ve Screened, Analysed in Depth & Crowned by Era.
                     </h1>
                     <p className="text-sm text-[#6E6A63] dark:text-[#9A9891] max-w-xl leading-relaxed">
-                      Switch seamlessly between your enriched theatrical poster catalog, the high-density FrameSheet spreadsheet & review phrase search, viewing heatmaps, two-profile taste comparisons, annual rankings, and personal Academy Awards ballots (1927–2026).
+                      Switch seamlessly between your enriched theatrical poster catalog, high-density spreadsheet & review phrase search, viewing heatmaps, two-profile taste comparisons, annual rankings, and personal Academy Awards ballots (1927–2026).
                     </p>
                   </div>
 
@@ -1121,15 +1253,15 @@ export default function App() {
             </section>
 
             {/* Filter & Search Bar */}
-            <section className="p-4 bg-[#F2EFE9] dark:bg-[#141519] border border-[#DED9CE] dark:border-[#262830] flex flex-wrap items-center justify-between gap-3">
+            <section className="p-4 bg-[#F2EFE9] dark:bg-[#141519] border border-[#DED9CE] dark:border-[#262830] flex flex-wrap items-center justify-between gap-2.5">
               {/* Search Input */}
-              <div className="relative flex-1 min-w-[220px]">
+              <div className="relative flex-1 min-w-[200px]">
                 <Search className="w-4 h-4 text-[#6E6A63] dark:text-[#9A9891] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Filter by title, director, actor, or release year..."
+                  placeholder="Filter by title, director, actor, genre, or release year..."
                   className="w-full pl-9 pr-3 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA] focus:outline-none focus:border-[#9A7B1C] dark:focus:border-[#D4AF37]"
                 />
               </div>
@@ -1139,9 +1271,9 @@ export default function App() {
                 value={decadeFilter}
                 onChange={(e) => setDecadeFilter(e.target.value)}
                 aria-label="Filter by Decade"
-                className="px-3 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
+                className="px-2.5 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
               >
-                <option value="all">All Decades (1920s–2020s)</option>
+                <option value="all">All Decades</option>
                 <option value="2020">2020s</option>
                 <option value="2010">2010s</option>
                 <option value="2000">2000s</option>
@@ -1160,13 +1292,41 @@ export default function App() {
                 value={minRatingFilter}
                 onChange={(e) => setMinRatingFilter(Number(e.target.value))}
                 aria-label="Filter by Rating"
-                className="px-3 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
+                className="px-2.5 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
               >
                 <option value={0}>Any Rating</option>
-                <option value={5}>★★★★★ Only (5.0)</option>
-                <option value={4.5}>★★★★½ & Above (4.5+)</option>
-                <option value={4}>★★★★ & Above (4.0+)</option>
-                <option value={3.5}>★★★½ & Above (3.5+)</option>
+                <option value={5}>★★★★★ (5.0)</option>
+                <option value={4.5}>★★★★½+ (4.5+)</option>
+                <option value={4}>★★★★+ (4.0+)</option>
+                <option value={3.5}>★★★½+ (3.5+)</option>
+              </select>
+
+              {/* FrameSheet Tier Filter */}
+              <select
+                value={tierFilter}
+                onChange={(e) => setTierFilter(e.target.value as any)}
+                aria-label="Filter by FrameSheet Tier"
+                className="px-2.5 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
+              >
+                <option value="all">All Tiers (S–D)</option>
+                <option value="S">Tier S Only</option>
+                <option value="A">Tier A Only</option>
+                <option value="B">Tier B Only</option>
+                <option value="C">Tier C Only</option>
+                <option value="D">Tier D Only</option>
+              </select>
+
+              {/* FrameSheet Watchlist & Diff Status Filter */}
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as any)}
+                aria-label="Filter by Status"
+                className="px-2.5 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
+              >
+                <option value="all">All Entries</option>
+                <option value="logged">Logged / Watched</option>
+                <option value="watchlist">Watchlist Queue</option>
+                <option value="modified">Modified vs. Letterboxd</option>
               </select>
 
               {/* Personal Oscar Status Filter */}
@@ -1174,7 +1334,7 @@ export default function App() {
                 value={oscarFilter}
                 onChange={(e) => setOscarFilter(e.target.value as any)}
                 aria-label="Filter by Personal Oscar Status"
-                className="px-3 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
+                className="px-2.5 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
               >
                 <option value="all">All Oscar Statuses</option>
                 <option value="nominated">Personal Oscar Nominees</option>
@@ -1186,7 +1346,7 @@ export default function App() {
                 value={listFilter}
                 onChange={(e) => setListFilter(e.target.value)}
                 aria-label="Filter by List"
-                className="px-3 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
+                className="px-2.5 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
               >
                 <option value="all">All Curated Lists</option>
                 {archive.lists.map((l) => (
@@ -1201,9 +1361,10 @@ export default function App() {
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as any)}
                 aria-label="Sort Films"
-                className="px-3 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
+                className="px-2.5 py-2 text-xs bg-[#FBF9F5] dark:bg-[#18191E] border border-[#DED9CE] dark:border-[#262830] text-[#181615] dark:text-[#F4F1EA]"
               >
                 <option value="rating-desc">Sort: Highest Rated</option>
+                <option value="sheet-rank">Sort: FrameSheet Global Rank</option>
                 <option value="year-desc">Sort: Year (Newest)</option>
                 <option value="year-asc">Sort: Year (1927 First)</option>
                 <option value="title-asc">Sort: Title (A–Z)</option>
@@ -1250,6 +1411,8 @@ export default function App() {
                     setSearchQuery('');
                     setDecadeFilter('all');
                     setMinRatingFilter(0);
+                    setTierFilter('all');
+                    setStatusFilter('all');
                     setOscarFilter('all');
                     setListFilter('all');
                   }}
@@ -1261,11 +1424,21 @@ export default function App() {
             ) : catalogViewMode === 'grid' ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
                 {filteredFilms.map((film) => {
-                  const oscarStats = oscarStatsByFilmId[film.id] || {
-                    nominations: [],
-                    wins: [],
-                  };
-                  const yrRank = yearRankByFilmId[film.id];
+                  const oscarStats =
+                    oscarStatsByFilmId[film.id] ||
+                    personalOscarByTitleYear.get(normalizeFilmMatchKey(film.title, film.year)) || {
+                      nominations: [],
+                      wins: [],
+                    };
+                  const yrRank =
+                    yearRankByFilmId[film.id] ??
+                    yearRankByTitleYear.get(normalizeFilmMatchKey(film.title, film.year));
+                  const pfEntry =
+                    profileEntryByKey.get(film.id) ||
+                    profileEntryByKey.get(normalizeFilmMatchKey(film.title, film.year));
+                  const isMod = pfEntry ? deviationsSummary.byFilmId.has(pfEntry.id) : false;
+                  const isOscarWinner = oscarStats.wins.length > 0;
+                  const isOscarNominee = oscarStats.nominations.length > 0;
 
                   return (
                     <article
@@ -1275,14 +1448,22 @@ export default function App() {
                     >
                       <PosterVisual film={film} className="w-full aspect-[2/3]" />
 
-                      <div className="space-y-1">
-                        {/* Zero-Pill Unboxed Metadata with Middots */}
-                        <div className="flex items-center flex-wrap gap-1 text-[11px] font-mono-tabular text-[#6E6A63] dark:text-[#9A9891]">
+                      <div className="space-y-1.5">
+                        {/* Metadata Line with Middots & Personal Oscar Summary Pill */}
+                        <div className="flex items-center flex-wrap gap-1.5 text-[11px] font-mono-tabular text-[#6E6A63] dark:text-[#9A9891]">
                           <span>{film.year}</span>
                           <span aria-hidden="true">·</span>
                           <span className="text-[#9A7B1C] dark:text-[#D4AF37] font-semibold">
                             {formatStarString(film.rating)}
                           </span>
+                          {pfEntry?.tier && pfEntry.tier !== 'Unranked' && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span className="text-[#181615] dark:text-[#F4F1EA] font-semibold">
+                                Tier {pfEntry.tier}
+                              </span>
+                            </>
+                          )}
                           {yrRank && (
                             <>
                               <span aria-hidden="true">·</span>
@@ -1290,6 +1471,52 @@ export default function App() {
                                 #{yrRank} in {film.year}
                               </span>
                             </>
+                          )}
+                          {pfEntry?.watchlist && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span className="text-[#9A7B1C] dark:text-[#D4AF37]">Watchlist</span>
+                            </>
+                          )}
+                          {isMod && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span className="text-amber-600 dark:text-amber-400">Modified</span>
+                            </>
+                          )}
+                          {isOscarNominee && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedYear(film.year);
+                                setActiveTab('ballots');
+                              }}
+                              title={
+                                isOscarWinner
+                                  ? `Personal Oscar Winner (${oscarStats.wins.join(', ')}) · ${oscarStats.nominations.length} Total Nominations (${oscarStats.nominations.join(', ')}) — Click to open ${film.year} Ballot`
+                                  : `Personal Oscar Nominee (${oscarStats.nominations.join(', ')}) — Click to open ${film.year} Ballot`
+                              }
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm text-[10px] font-mono-tabular leading-tight shrink-0 border transition-colors cursor-pointer ${
+                                isOscarWinner
+                                  ? 'bg-[#9A7B1C]/15 dark:bg-[#D4AF37]/15 text-[#9A7B1C] dark:text-[#D4AF37] border-[#9A7B1C]/40 dark:border-[#D4AF37]/40 hover:bg-[#9A7B1C]/25 dark:hover:bg-[#D4AF37]/25 font-semibold'
+                                  : 'bg-[#EBE6DF] dark:bg-[#1C1E24] text-[#6E6A63] dark:text-[#C8C4B8] border-[#DED9CE] dark:border-[#2A2D36] hover:border-[#9A7B1C]/50 dark:hover:border-[#D4AF37]/50 font-medium'
+                              }`}
+                            >
+                              {isOscarWinner ? (
+                                <>
+                                  <Trophy className="w-2.5 h-2.5 shrink-0" />
+                                  <span>
+                                    Oscar Winner · {oscarStats.wins.length}W/{oscarStats.nominations.length}N
+                                  </span>
+                                </>
+                              ) : (
+                                <>
+                                  <Award className="w-2.5 h-2.5 text-[#9A7B1C] dark:text-[#D4AF37] shrink-0" />
+                                  <span>Oscar Nominee · {oscarStats.nominations.length}N</span>
+                                </>
+                              )}
+                            </button>
                           )}
                         </div>
 
@@ -1299,14 +1526,10 @@ export default function App() {
 
                         <p className="text-xs text-[#6E6A63] dark:text-[#9A9891] truncate">
                           {film.metadata?.director ? `Dir. ${film.metadata.director}` : 'Feature Film'}
-                          {oscarStats.nominations.length > 0 && (
+                          {pfEntry?.customRank !== null && pfEntry?.customRank !== undefined && (
                             <>
                               <span aria-hidden="true"> · </span>
-                              <span className="text-[#9A7B1C] dark:text-[#D4AF37] font-mono-tabular">
-                                {oscarStats.wins.length > 0
-                                  ? `★ ${oscarStats.wins.length} Win / ${oscarStats.nominations.length} Nom`
-                                  : `${oscarStats.nominations.length} Nom`}
-                              </span>
+                              <span className="font-mono-tabular">Sheet #{pfEntry.customRank}</span>
                             </>
                           )}
                         </p>
@@ -1316,7 +1539,7 @@ export default function App() {
                 })}
               </div>
             ) : (
-              /* Swiss Archival Ledger Table View */
+              /* Swiss Archival Ledger Table View (Combining Cineaste + FrameSheet Columns) */
               <div className="border border-[#DED9CE] dark:border-[#262830] bg-[#FBF9F5] dark:bg-[#121316] overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
@@ -1325,17 +1548,31 @@ export default function App() {
                       <th className="py-3 px-4">Film Title</th>
                       <th className="py-3 px-4">Director</th>
                       <th className="py-3 px-4">Rating</th>
+                      <th className="py-3 px-4 text-center">Tier</th>
+                      <th className="py-3 px-4 text-right">Sheet Rank</th>
                       <th className="py-3 px-4 text-right">Year Rank</th>
                       <th className="py-3 px-4 text-right">Personal Oscars</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#DED9CE] dark:divide-[#262830] text-sm">
                     {filteredFilms.map((film) => {
-                      const oscarStats = oscarStatsByFilmId[film.id] || {
-                        nominations: [],
-                        wins: [],
-                      };
-                      const yrRank = yearRankByFilmId[film.id];
+                      const oscarStats =
+                        oscarStatsByFilmId[film.id] ||
+                        personalOscarByTitleYear.get(
+                          normalizeFilmMatchKey(film.title, film.year)
+                        ) || {
+                          nominations: [],
+                          wins: [],
+                        };
+                      const yrRank =
+                        yearRankByFilmId[film.id] ??
+                        yearRankByTitleYear.get(normalizeFilmMatchKey(film.title, film.year));
+                      const pfEntry =
+                        profileEntryByKey.get(film.id) ||
+                        profileEntryByKey.get(normalizeFilmMatchKey(film.title, film.year));
+                      const isMod = pfEntry ? deviationsSummary.byFilmId.has(pfEntry.id) : false;
+                      const isOscarWinner = oscarStats.wins.length > 0;
+                      const isOscarNominee = oscarStats.nominations.length > 0;
 
                       return (
                         <tr
@@ -1343,11 +1580,23 @@ export default function App() {
                           onClick={() => setSelectedFilmIdForModal(film.id)}
                           className="hover:bg-[#F2EFE9]/60 dark:hover:bg-[#18191E]/60 cursor-pointer transition-colors"
                         >
-                          <td className="py-3 px-4 font-mono-tabular text-xs text-[#6E6A63] dark:text-[#9A9891]">
+                          <td className="py-3 px-4 font-mono-tabular text-xs text-[#6E6A63] dark:text-[#9A9891] tabular-nums">
                             {film.year}
                           </td>
                           <td className="py-3 px-4 font-editorial font-semibold text-base text-[#181615] dark:text-[#F4F1EA]">
-                            {film.title}
+                            <div className="flex items-center gap-2">
+                              <span>{film.title}</span>
+                              {pfEntry?.watchlist && (
+                                <span className="text-[10px] font-mono-tabular uppercase tracking-wider text-[#9A7B1C] dark:text-[#D4AF37]">
+                                  Watchlist
+                                </span>
+                              )}
+                              {isMod && (
+                                <span className="text-[10px] font-mono-tabular uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                                  Modified
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="py-3 px-4 text-xs text-[#6E6A63] dark:text-[#9A9891]">
                             {film.metadata?.director || '—'}
@@ -1355,13 +1604,48 @@ export default function App() {
                           <td className="py-3 px-4 font-mono-tabular text-xs text-[#9A7B1C] dark:text-[#D4AF37]">
                             {formatStarString(film.rating)}
                           </td>
-                          <td className="py-3 px-4 font-mono-tabular text-xs text-right text-[#181615] dark:text-[#F4F1EA]">
+                          <td className="py-3 px-4 font-mono-tabular text-xs text-center text-[#181615] dark:text-[#F4F1EA]">
+                            {pfEntry?.tier && pfEntry.tier !== 'Unranked' ? pfEntry.tier : '—'}
+                          </td>
+                          <td className="py-3 px-4 font-mono-tabular text-xs text-right text-[#6E6A63] dark:text-[#9A9891] tabular-nums">
+                            {pfEntry?.customRank !== null && pfEntry?.customRank !== undefined
+                              ? `#${pfEntry.customRank}`
+                              : '—'}
+                          </td>
+                          <td className="py-3 px-4 font-mono-tabular text-xs text-right text-[#181615] dark:text-[#F4F1EA] tabular-nums">
                             {yrRank ? `#${String(yrRank).padStart(2, '0')}` : '—'}
                           </td>
-                          <td className="py-3 px-4 font-mono-tabular text-xs text-right text-[#9A7B1C] dark:text-[#D4AF37]">
-                            {oscarStats.nominations.length > 0
-                              ? `${oscarStats.wins.length}W / ${oscarStats.nominations.length}N`
-                              : '—'}
+                          <td className="py-3 px-4 font-mono-tabular text-xs text-right tabular-nums">
+                            {isOscarNominee ? (
+                              <span
+                                title={
+                                  isOscarWinner
+                                    ? `Personal Oscar Winner (${oscarStats.wins.join(', ')}) · ${oscarStats.nominations.length} Nominations`
+                                    : `Personal Oscar Nominee (${oscarStats.nominations.join(', ')})`
+                                }
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm text-[10px] font-mono-tabular border ${
+                                  isOscarWinner
+                                    ? 'bg-[#9A7B1C]/15 dark:bg-[#D4AF37]/15 text-[#9A7B1C] dark:text-[#D4AF37] border-[#9A7B1C]/40 dark:border-[#D4AF37]/40 font-semibold'
+                                    : 'bg-[#EBE6DF] dark:bg-[#1C1E24] text-[#6E6A63] dark:text-[#C8C4B8] border-[#DED9CE] dark:border-[#2A2D36] font-medium'
+                                }`}
+                              >
+                                {isOscarWinner ? (
+                                  <>
+                                    <Trophy className="w-2.5 h-2.5 shrink-0" />
+                                    <span>
+                                      Winner · {oscarStats.wins.length}W/{oscarStats.nominations.length}N
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Award className="w-2.5 h-2.5 text-[#9A7B1C] dark:text-[#D4AF37] shrink-0" />
+                                    <span>Nominee · {oscarStats.nominations.length}N</span>
+                                  </>
+                                )}
+                              </span>
+                            ) : (
+                              <span className="text-[#6E6A63] dark:text-[#9A9891]">—</span>
+                            )}
                           </td>
                         </tr>
                       );
@@ -1388,6 +1672,16 @@ export default function App() {
             initialInspectedFilmId={spreadsheetInspectedFilmId}
             onClearInitialInspectedFilm={() => setSpreadsheetInspectedFilmId(null)}
             onOpenFilmCreditsModal={handleOpenFilmCreditsModalFromEntry}
+            yearRankByTitleYear={yearRankByTitleYear}
+            personalOscarByTitleYear={personalOscarByTitleYear}
+            onNavigateToYearRanking={(year) => {
+              setSelectedYear(year);
+              setActiveTab('rankings');
+            }}
+            onNavigateToYearBallot={(year) => {
+              setSelectedYear(year);
+              setActiveTab('ballots');
+            }}
           />
         )}
 
@@ -1413,10 +1707,16 @@ export default function App() {
               setActiveTab('ballots');
             }}
             onQuickAddFilmFromImdb={handleQuickAddFilmFromImdb}
+            profileFilms={activeProfile.films}
+            personalOscarByTitleYear={personalOscarByTitleYear}
+            onOpenCohortInAnalytics={(cohort) => {
+              setAnalyticsTargetCohort(cohort);
+              setActiveTab('analytics');
+            }}
           />
         )}
 
-        {/* VIEW 4: PERSONAL ACADEMY AWARDS BALLOTS (1927-PRESENT) */}
+        {/* VIEW 4: UNIFIED PERSONAL OSCARS & INDUSTRY AWARDS / CRITICS POLLS STUDIO */}
         {activeTab === 'ballots' && (
           <OscarBallotView
             selectedYear={selectedYear}
@@ -1439,6 +1739,15 @@ export default function App() {
               setActiveTab('rankings');
             }}
             onEnrichSingleFilm={enrichSingleFilm}
+            profile={activeProfile}
+            onUpdateProfileFilms={handleUpdateActiveProfileFilms}
+            onQuickAddFilmToArchive={(title, year, director) =>
+              handleQuickAddFilmFromImdb(title, year, undefined, director)
+            }
+            onOpenCohortInAnalytics={(cohort) => {
+              setAnalyticsTargetCohort(cohort);
+              setActiveTab('analytics');
+            }}
           />
         )}
 
@@ -1451,6 +1760,16 @@ export default function App() {
             onSelectCohort={setAnalyticsTargetCohort}
             onSaveCohort={handleSaveCohort}
             onDeleteSavedCohort={handleDeleteSavedCohort}
+            onInspectFilm={handleOpenFilmCreditsModalFromEntry}
+            onInspectExternalFilm={async (title, year, director) => {
+              const existingId = makeFilmId(title, year);
+              if (archive.films[existingId]) {
+                setSelectedFilmIdForModal(existingId);
+              } else {
+                const newId = await handleQuickAddFilmFromImdb(title, year, undefined, director);
+                setSelectedFilmIdForModal(newId);
+              }
+            }}
           />
         )}
 
@@ -1460,6 +1779,15 @@ export default function App() {
             profile={activeProfile}
             onUpdateFilms={handleUpdateActiveProfileFilms}
             onUpdateDismissedRecommendations={handleUpdateDismissedRecommendations}
+            onInspectFilm={async (title, year, director) => {
+              const existingId = makeFilmId(title, year);
+              if (archive.films[existingId]) {
+                setSelectedFilmIdForModal(existingId);
+              } else {
+                const newId = await handleQuickAddFilmFromImdb(title, year, undefined, director);
+                setSelectedFilmIdForModal(newId);
+              }
+            }}
           />
         )}
 
@@ -1472,18 +1800,13 @@ export default function App() {
             onSelectPrimary={handleSelectActiveProfile}
             onSelectSecondary={setCompareSecondaryId}
             onOpenImport={() => setActiveTab('sources')}
-          />
-        )}
-
-        {/* VIEW 8: INDUSTRY AWARDS, CRITICS POLLS & PERIODICALS */}
-        {activeTab === 'awards_lists' && (
-          <ExternalListsView
-            profile={activeProfile}
-            onUpdateFilms={handleUpdateActiveProfileFilms}
-            onNavigateToPersonalOscarBallots={(year) => {
-              if (year) setSelectedYear(year);
-              setActiveTab('ballots');
+            onInspectFilm={handleOpenFilmCreditsModalFromEntry}
+            onOpenCohortInAnalytics={(cohort) => {
+              setAnalyticsTargetCohort(cohort);
+              setActiveTab('analytics');
             }}
+            personalOscarByTitleYear={personalOscarByTitleYear}
+            personalYearRankByTitleYear={yearRankByTitleYear}
           />
         )}
 
@@ -1499,6 +1822,14 @@ export default function App() {
               }))
             }
             onSelectFilmForModal={(film) => setSelectedFilmIdForModal(film.id)}
+            profileFilms={activeProfile.films}
+            baselineFilms={activeProfile.baselineFilms}
+            yearRankByTitleYear={yearRankByTitleYear}
+            personalOscarByTitleYear={personalOscarByTitleYear}
+            onOpenCohortInAnalytics={(cohort) => {
+              setAnalyticsTargetCohort(cohort);
+              setActiveTab('analytics');
+            }}
           />
         )}
 
@@ -1513,6 +1844,39 @@ export default function App() {
               handleSelectActiveProfile(id);
               setActiveTab('spreadsheet');
             }}
+            archive={archive}
+            onImportCsvToArchive={(files) => {
+              const { nextState, summary } = ingestLetterboxdCsvFiles(files, archive);
+              updateUnifiedArchive(nextState);
+              return {
+                listsImported: summary.listsImported,
+                reviewsImported: summary.reviewsImported,
+              };
+            }}
+            onRestoreUnifiedWorkspace={({ archive: restoredArchive, profiles: restoredProfiles }) => {
+              if (restoredArchive) {
+                setArchive(restoredArchive);
+                if (restoredProfiles && restoredProfiles.length > 0) {
+                  setProfiles(propagateMetadataAcrossAllProfiles(restoredArchive, restoredProfiles));
+                  setActiveProfileId(restoredProfiles[0].id);
+                } else {
+                  setProfiles((prev) =>
+                    propagateMetadataAcrossAllProfiles(
+                      restoredArchive,
+                      prev.map((p, idx) =>
+                        idx === 0 ? syncArchiveIntoProfile(restoredArchive, p) : p
+                      )
+                    )
+                  );
+                }
+              } else if (restoredProfiles && restoredProfiles.length > 0) {
+                setProfiles(propagateMetadataAcrossAllProfiles(archive, restoredProfiles));
+                setActiveProfileId(restoredProfiles[0].id);
+              }
+            }}
+            isBatchEnriching={enrichmentProgress.active}
+            enrichProgress={enrichmentProgress}
+            onTriggerBatchEnrich={() => triggerBatchEnrich(true)}
           />
         )}
 
@@ -1527,6 +1891,7 @@ export default function App() {
               }
               setActiveTab('spreadsheet');
             }}
+            onInspectFilmModal={handleOpenFilmCreditsModalFromEntry}
           />
         )}
       </main>
@@ -1534,7 +1899,7 @@ export default function App() {
       {/* Quiet Archival Footer */}
       <footer className="mt-16 border-t border-[#DED9CE] dark:border-[#262830] py-6 px-6 lg:px-10 text-xs text-[#6E6A63] dark:text-[#9A9891] flex flex-wrap items-center justify-between gap-4 max-w-[1440px] w-full mx-auto">
         <span>
-          Cineaste Ledger × FrameSheet · Unified Letterboxd Analytics, Spreadsheet, Rankings & Academy Awards Ballot (1927–2026)
+          PMDB, The Personal Movie Database · Unified Letterboxd Analytics, Spreadsheet, Rankings & Academy Awards Ballot (1927–2026)
         </span>
         <div className="flex items-center gap-4">
           <button
@@ -1572,16 +1937,46 @@ export default function App() {
             oscarStatsByFilmId[activeModalFilm.id] || { nominations: [], wins: [] }
           }
           yearRank={yearRankByFilmId[activeModalFilm.id]}
+          profileEntry={activeModalProfileEntry}
+          baselineEntry={activeModalBaselineEntry}
           onClose={() => setSelectedFilmIdForModal(null)}
-          onSaveFilm={(updated) =>
+          onSaveFilm={(updated, frameSheetPatch) => {
             updateUnifiedArchive((prev) => ({
               ...prev,
               films: {
                 ...prev.films,
                 [updated.id]: updated,
               },
-            }))
-          }
+            }));
+            if (frameSheetPatch && activeModalProfileEntry) {
+              setProfiles((prevProfiles) =>
+                prevProfiles.map((p) => {
+                  if (p.id !== activeProfile.id) return p;
+                  return {
+                    ...p,
+                    films: p.films.map((entry): FilmEntry =>
+                      entry.id === activeModalProfileEntry.id ||
+                      normalizeFilmMatchKey(entry.title, entry.year) ===
+                        normalizeFilmMatchKey(updated.title, updated.year)
+                        ? {
+                            ...entry,
+                            ...frameSheetPatch,
+                            rating: updated.rating ?? null,
+                            liked: Boolean(updated.liked),
+                            watchedDate: updated.watchedDate ?? entry.watchedDate,
+                            notes: updated.review || '',
+                            tags: updated.tags || entry.tags,
+                            director: updated.metadata?.director || entry.director,
+                            posterUrl: updated.metadata?.posterUrl || entry.posterUrl,
+                            genres: updated.metadata?.genres || frameSheetPatch.genres || entry.genres,
+                          }
+                        : entry
+                    ),
+                  };
+                })
+              );
+            }
+          }}
           onEnrichSingleFilm={enrichSingleFilm}
           onNavigateToYearBallot={(year) => {
             setSelectedYear(year);
@@ -1590,6 +1985,10 @@ export default function App() {
           onNavigateToYearRanking={(year) => {
             setSelectedYear(year);
             setActiveTab('rankings');
+          }}
+          onOpenInSpreadsheet={(entryId) => {
+            setSpreadsheetInspectedFilmId(entryId);
+            setActiveTab('spreadsheet');
           }}
         />
       )}

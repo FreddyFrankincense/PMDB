@@ -74,7 +74,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `cineaste-ledger-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `pmdb-archive-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -89,7 +89,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
       const text = await file.text();
       const parsed = JSON.parse(text) as CineasteArchiveState;
       if (!parsed || typeof parsed.films !== 'object') {
-        throw new Error('Invalid Cineaste Ledger JSON structure');
+        throw new Error('Invalid PMDB JSON backup structure');
       }
       onUpdateArchive({
         films: parsed.films || {},

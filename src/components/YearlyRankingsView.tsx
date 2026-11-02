@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ArrowUp,
   ArrowDown,
@@ -7,6 +7,8 @@ import {
   Sparkles,
   Award,
   Search,
+  BarChart2,
+  Landmark,
 } from 'lucide-react';
 import {
   FilmRecord,
@@ -14,6 +16,9 @@ import {
   YearlyRanking,
   YearlyRankingEntry,
 } from '../types/cinema';
+import { FilmEntry } from '../types/letterboxd';
+import { INDUSTRY_AND_CRITIC_LISTS } from '../data/industryLists';
+import { FilmGroupCohort } from './GroupHistogramPanel';
 import { PosterVisual } from './PosterVisual';
 import { formatStarString } from './StarRatingDisplay';
 
@@ -26,6 +31,9 @@ interface YearlyRankingsViewProps {
   onSelectFilmForModal: (film: FilmRecord) => void;
   onNavigateToYearBallot: (year: number) => void;
   onQuickAddFilmFromImdb: (title: string, year: number, posterUrl?: string, castSnippet?: string) => Promise<string>;
+  profileFilms?: FilmEntry[];
+  personalOscarByTitleYear?: Map<string, { nominations: string[]; wins: string[] }>;
+  onOpenCohortInAnalytics?: (cohort: FilmGroupCohort) => void;
 }
 
 const DECADES = [2020, 2010, 2000, 1990, 1980, 1970, 1960, 1950, 1940, 1930, 1920];
@@ -39,6 +47,9 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
   onSelectFilmForModal,
   onNavigateToYearBallot,
   onQuickAddFilmFromImdb,
+  profileFilms = [],
+  personalOscarByTitleYear,
+  onOpenCohortInAnalytics,
 }) => {
   const activeDecade = Math.floor(selectedYear / 10) * 10;
   const [selectedDecade, setSelectedDecade] = useState<number>(
@@ -77,10 +88,83 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
   const rankedFilmIds = new Set(currentRanking.entries.map((e) => e.filmId));
   const unrankedPool = filmsForYear.filter((f) => !rankedFilmIds.has(f.id));
 
+  // FrameSheet Year-Level Statistics & Genre Breakdown
+  const yearAnalytics = useMemo(() => {
+    const rated = filmsForYear.filter((f) => f.rating !== null && f.rating !== undefined);
+    const meanRating =
+      rated.length > 0
+        ? rated.reduce((sum, f) => sum + (f.rating || 0), 0) / rated.length
+        : 0;
+    const masterworkCount = rated.filter((f) => (f.rating || 0) >= 4.5).length;
+    const genreCounts = new Map<string, number>();
+    for (const f of filmsForYear) {
+      for (const g of f.metadata?.genres || []) {
+        genreCounts.set(g, (genreCounts.get(g) || 0) + 1);
+      }
+    }
+    const topGenres = Array.from(genreCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([g, count]) => `${g} (${count})`);
+
+    const yearProfileFilms = profileFilms.filter((pf) => pf.year === selectedYear);
+
+    return {
+      totalLogged: filmsForYear.length,
+      ratedCount: rated.length,
+      meanRating,
+      masterworkCount,
+      topGenres,
+      yearProfileFilms,
+    };
+  }, [filmsForYear, profileFilms, selectedYear]);
+
+  // Official Industry & Critics Consensus for {selectedYear}
+  const industryConsensusForYear = useMemo(() => {
+    const mapByTitle = new Map<
+      string,
+      {
+        title: string;
+        year: number;
+        director: string;
+        consensusRating: number;
+        citations: Array<{ shortName: string; status: string; rank: number; detail: string }>;
+      }
+    >();
+
+    for (const list of INDUSTRY_AND_CRITIC_LISTS) {
+      for (const entry of list.entries) {
+        if (entry.year !== selectedYear) continue;
+        const key = entry.title.toLowerCase();
+        const existing = mapByTitle.get(key);
+        const citation = {
+          shortName: list.shortName,
+          status: entry.status,
+          rank: entry.rank,
+          detail: entry.accoladeDetail,
+        };
+        if (existing) {
+          existing.citations.push(citation);
+        } else {
+          mapByTitle.set(key, {
+            title: entry.title,
+            year: entry.year,
+            director: entry.director,
+            consensusRating: entry.consensusRating,
+            citations: [citation],
+          });
+        }
+      }
+    }
+
+    return Array.from(mapByTitle.values());
+  }, [selectedYear]);
+
   const normalizeRanks = (entries: YearlyRankingEntry[]): YearlyRankingEntry[] =>
     entries.map((item, idx) => ({ ...item, rank: idx + 1 }));
 
   const handleAddFilmToRanking = (film: FilmRecord) => {
+    if (rankedFilmIds.has(film.id)) return;
     const defaultTier: RankingTier =
       (film.rating || 0) >= 5.0
         ? 'Masterpiece'
@@ -192,18 +276,39 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
             </h2>
           </div>
 
-          <button
-            type="button"
-            onClick={() => onNavigateToYearBallot(selectedYear)}
-            className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium border border-[#9A7B1C]/50 dark:border-[#D4AF37]/50 text-[#9A7B1C] dark:text-[#D4AF37] hover:bg-[#9A7B1C]/10 dark:hover:bg-[#D4AF37]/10 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <Award className="w-3.5 h-3.5" />
-            <span>Open {selectedYear} Personal Oscar Ballot →</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {onOpenCohortInAnalytics && yearAnalytics.yearProfileFilms.length > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  onOpenCohortInAnalytics({
+                    id: `year-cohort-${selectedYear}`,
+                    label: `Release Year ${selectedYear} (${yearAnalytics.yearProfileFilms.length} Films)`,
+                    description: `All logged & ranked films from ${selectedYear}`,
+                    sourceType: 'group_section',
+                    films: yearAnalytics.yearProfileFilms,
+                  })
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-[#DED9CE] dark:border-[#2A2D37] bg-[#FBF9F5] dark:bg-[#18191E] text-[#181615] dark:text-[#F4F1EA] hover:border-[#9A7B1C] dark:hover:border-[#D4AF37] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <BarChart2 className="w-3.5 h-3.5 text-[#9A7B1C] dark:text-[#D4AF37]" />
+                <span>Analyze {selectedYear} Cohort in Analytics</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => onNavigateToYearBallot(selectedYear)}
+              className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium border border-[#9A7B1C]/50 dark:border-[#D4AF37]/50 text-[#9A7B1C] dark:text-[#D4AF37] hover:bg-[#9A7B1C]/10 dark:hover:bg-[#D4AF37]/10 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Award className="w-3.5 h-3.5" />
+              <span>Open {selectedYear} Oscars &amp; Industry Awards →</span>
+            </button>
+          </div>
         </div>
 
         {/* Decades */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+        <div className="flex flex-wrap items-center gap-1.5">
           {DECADES.map((dec) => {
             const active = selectedDecade === dec;
             return (
@@ -230,7 +335,7 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
         </div>
 
         {/* Years within Selected Decade */}
-        <div className="flex items-center gap-2 overflow-x-auto pt-1">
+        <div className="flex flex-wrap items-center gap-2 pt-1">
           {yearsInDecade.map((yr) => {
             const isSelected = yr === selectedYear;
             const yearFilmCount = (Object.values(films) as FilmRecord[]).filter(
@@ -258,6 +363,47 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
               </button>
             );
           })}
+        </div>
+
+        {/* Year-at-a-Glance FrameSheet Telemetry Strip */}
+        <div className="pt-2 border-t border-[#DED9CE] dark:border-[#262830] flex flex-wrap items-center justify-between gap-4 text-xs font-mono-tabular text-[#6E6A63] dark:text-[#9A9891]">
+          <div className="flex flex-wrap items-center gap-4">
+            <span>
+              {selectedYear} Logged:{' '}
+              <strong className="text-[#181615] dark:text-[#F4F1EA]">
+                {yearAnalytics.totalLogged}
+              </strong>
+            </span>
+            <span>·</span>
+            <span>
+              Ranked:{' '}
+              <strong className="text-[#9A7B1C] dark:text-[#D4AF37]">
+                {currentRanking.entries.length}
+              </strong>
+            </span>
+            <span>·</span>
+            <span>
+              Mean Rating:{' '}
+              <strong className="text-[#9A7B1C] dark:text-[#D4AF37]">
+                {yearAnalytics.ratedCount > 0 ? `${yearAnalytics.meanRating.toFixed(2)} ★` : '—'}
+              </strong>
+            </span>
+            <span>·</span>
+            <span>
+              Tier S (4.5★+):{' '}
+              <strong className="text-emerald-600 dark:text-emerald-400">
+                {yearAnalytics.masterworkCount}
+              </strong>
+            </span>
+          </div>
+          {yearAnalytics.topGenres.length > 0 && (
+            <div>
+              Dominant {selectedYear} Genres:{' '}
+              <span className="text-[#181615] dark:text-[#F4F1EA]">
+                {yearAnalytics.topGenres.join(' · ')}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -314,7 +460,7 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
                 No films ranked for {selectedYear} yet.
               </p>
               <p className="text-xs text-[#6E6A63] dark:text-[#9A9891] max-w-md mx-auto">
-                Add films from your {selectedYear} watched pool on the right, or search the public IMDb catalog to log and rank any release from {selectedYear}.
+                Add films from your {selectedYear} watched pool on the right, or seed directly from Official {selectedYear} Industry &amp; Critics Consensus below.
               </p>
               {unrankedPool.length > 0 && (
                 <button
@@ -332,6 +478,13 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
               {currentRanking.entries.map((entry, idx) => {
                 const film = films[entry.filmId];
                 if (!film) return null;
+
+                const oscarStat = personalOscarByTitleYear?.get(
+                  `${film.title.trim().toLowerCase()}::${film.year}`
+                );
+                const industryMatch = industryConsensusForYear.find(
+                  (c) => c.title.toLowerCase() === film.title.trim().toLowerCase()
+                );
 
                 return (
                   <div
@@ -390,18 +543,40 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
                           >
                             {film.title}
                           </button>
-                          <div className="text-xs text-[#6E6A63] dark:text-[#9A9891] mt-0.5">
+                          <div className="text-xs text-[#6E6A63] dark:text-[#9A9891] mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                             <span>{film.year}</span>
                             {film.metadata?.director && (
                               <>
-                                <span aria-hidden="true"> · </span>
+                                <span aria-hidden="true">·</span>
                                 <span>Dir. {film.metadata.director}</span>
                               </>
                             )}
-                            <span aria-hidden="true"> · </span>
+                            <span aria-hidden="true">·</span>
                             <span className="font-mono-tabular text-[#9A7B1C] dark:text-[#D4AF37]">
                               {formatStarString(film.rating)}
                             </span>
+                            {oscarStat && oscarStat.nominations.length > 0 && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="font-mono-tabular text-[#9A7B1C] dark:text-[#D4AF37] font-medium">
+                                  Personal Oscars: {oscarStat.wins.length}W / {oscarStat.nominations.length}N
+                                </span>
+                              </>
+                            )}
+                            {industryMatch && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="font-mono-tabular text-emerald-600 dark:text-emerald-400">
+                                  {industryMatch.citations
+                                    .map((c) =>
+                                      c.status === 'Ranked'
+                                        ? `${c.shortName} #${c.rank}`
+                                        : `${c.shortName} ${c.status}`
+                                    )
+                                    .join(', ')}
+                                </span>
+                              </>
+                            )}
                           </div>
                         </div>
 
@@ -456,7 +631,7 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
           )}
         </div>
 
-        {/* Right 4 Columns: Unranked Pool for Year + Live IMDb Add */}
+        {/* Right 4 Columns: Unranked Pool + Official Industry Consensus + Live IMDb Add */}
         <div className="lg:col-span-4 space-y-6">
           {/* Unranked Watched Pool */}
           <div className="p-5 bg-[#F2EFE9] dark:bg-[#141519] border border-[#DED9CE] dark:border-[#262830] space-y-4">
@@ -507,11 +682,94 @@ export const YearlyRankingsView: React.FC<YearlyRankingsViewProps> = ({
             )}
           </div>
 
+          {/* Official Industry & Critics Consensus for {selectedYear} */}
+          {industryConsensusForYear.length > 0 && (
+            <div className="p-5 bg-[#F2EFE9] dark:bg-[#141519] border border-[#DED9CE] dark:border-[#262830] space-y-3">
+              <div className="flex items-center gap-2">
+                <Landmark className="w-4 h-4 text-[#9A7B1C] dark:text-[#D4AF37]" />
+                <h4 className="text-sm font-semibold text-[#181615] dark:text-[#F4F1EA]">
+                  {selectedYear} Industry &amp; Critics Consensus ({industryConsensusForYear.length})
+                </h4>
+              </div>
+              <p className="text-xs text-[#6E6A63] dark:text-[#9A9891]">
+                Compare your {selectedYear} ranking against Academy Awards, BAFTAs, Sight &amp; Sound, Empire, &amp; EW.
+              </p>
+
+              <div className="divide-y divide-[#DED9CE] dark:divide-[#262830] border-t border-[#DED9CE] dark:border-[#262830] max-h-80 overflow-y-auto">
+                {industryConsensusForYear.map((item) => {
+                  const matchedFilm = filmsForYear.find(
+                    (f) => f.title.trim().toLowerCase() === item.title.toLowerCase()
+                  );
+                  const rankedEntry = matchedFilm
+                    ? currentRanking.entries.find((e) => e.filmId === matchedFilm.id)
+                    : undefined;
+
+                  return (
+                    <div key={item.title} className="py-2.5 space-y-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-[#181615] dark:text-[#F4F1EA] truncate">
+                            {item.title}
+                          </div>
+                          <div className="text-[11px] text-[#6E6A63] dark:text-[#9A9891]">
+                            Dir. {item.director} · Consensus {item.consensusRating.toFixed(1)} ★
+                          </div>
+                        </div>
+
+                        {rankedEntry ? (
+                          <span className="text-[11px] font-mono-tabular font-semibold text-emerald-600 dark:text-emerald-400 shrink-0">
+                            Ranked #{rankedEntry.rank}
+                          </span>
+                        ) : matchedFilm ? (
+                          <button
+                            type="button"
+                            onClick={() => handleAddFilmToRanking(matchedFilm)}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono-tabular bg-[#181615] dark:bg-[#F4F1EA] text-[#FBF9F5] dark:text-[#0C0C0E] cursor-pointer shrink-0"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>Rank</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const newId = await onQuickAddFilmFromImdb(
+                                item.title,
+                                item.year,
+                                undefined,
+                                item.director
+                              );
+                              if (films[newId]) {
+                                handleAddFilmToRanking(films[newId]);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono-tabular border border-[#9A7B1C] dark:border-[#D4AF37] text-[#9A7B1C] dark:text-[#D4AF37] hover:bg-[#9A7B1C]/10 cursor-pointer shrink-0"
+                          >
+                            <span>+ Log &amp; Rank</span>
+                          </button>
+                        )}
+                      </div>
+                      <div className="text-[11px] font-mono-tabular text-[#9A7B1C] dark:text-[#D4AF37]">
+                        {item.citations
+                          .map((c) =>
+                            c.status === 'Ranked'
+                              ? `${c.shortName} #${c.rank}`
+                              : `${c.shortName} (${c.status})`
+                          )
+                          .join(' · ')}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Quick Add Film from Public IMDb Catalog for Selected Year */}
           <div className="p-5 bg-[#F2EFE9] dark:bg-[#141519] border border-[#DED9CE] dark:border-[#262830] space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-[#181615] dark:text-[#F4F1EA]">
-                Discover & Add {selectedYear} Films (IMDb Public Index)
+                Discover &amp; Add {selectedYear} Films (IMDb Public Index)
               </h4>
               <p className="text-xs text-[#6E6A63] dark:text-[#9A9891] mt-0.5">
                 Missing a film from {selectedYear}? Search to fetch its poster and credits directly into your {selectedYear} canon.

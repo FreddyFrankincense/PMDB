@@ -36,10 +36,11 @@ export function filmRecordToFilmEntry(
     : existing?.runtimeMinutes || meta.runtimeMinutes;
 
   const rating =
-    record.rating !== undefined ? record.rating : existing?.rating ?? null;
+    'rating' in record ? (record.rating ?? null) : existing?.rating ?? null;
   const isWatchlist =
+    record.tags?.includes('letterboxd-watchlist') ??
     existing?.watchlist ??
-    (record.tags?.includes('letterboxd-watchlist') || false);
+    false;
 
   return {
     id: existing?.id || record.id,
@@ -89,18 +90,23 @@ export function filmEntryToFilmRecord(
   existing?: FilmRecord
 ): FilmRecord {
   const id = existing?.id || makeFilmId(entry.title, entry.year);
+  const baseTags = (entry.tags || []).filter((t) => t !== 'letterboxd-watchlist');
+  const syncedTags = entry.watchlist
+    ? ['letterboxd-watchlist', ...baseTags]
+    : baseTags;
+
   return {
     id,
     title: entry.title,
     year: entry.year,
     letterboxdUri: entry.letterboxdUri || existing?.letterboxdUri,
-    rating: entry.rating,
+    rating: entry.rating !== null ? entry.rating : undefined,
     liked: entry.liked,
     rewatch: entry.rewatch,
-    watchedDate: entry.watchedDate || existing?.watchedDate,
+    watchedDate: entry.watchlist ? undefined : entry.watchedDate || existing?.watchedDate,
     ratedDate: entry.loggedDate || existing?.ratedDate,
-    review: entry.notes || existing?.review,
-    tags: entry.tags,
+    review: entry.notes !== undefined ? entry.notes : existing?.review,
+    tags: syncedTags,
     listIds: existing?.listIds || [],
     metadata: {
       ...(existing?.metadata || {}),
@@ -118,6 +124,16 @@ export function filmEntryToFilmRecord(
   };
 }
 
+export function normalizeFilmMatchKey(title: string, year: number): string {
+  const cleanTitle = title
+    .toLowerCase()
+    .replace(/[’‘`]/g, "'")
+    .replace(/[^a-z0-9']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `${cleanTitle}::${year}`;
+}
+
 /**
  * Syncs Cineaste Ledger's FilmRecord dictionary into a FrameSheet ProfileAccount
  * so any film added/edited in Catalog, Rankings, or Oscar Ballots appears in FrameSheet.
@@ -130,13 +146,13 @@ export function syncArchiveIntoProfile(
   const updatedFilms = [...profile.films];
 
   updatedFilms.forEach((f, idx) => {
-    existingByKey.set(`${f.title.trim().toLowerCase()}::${f.year}`, idx);
+    existingByKey.set(normalizeFilmMatchKey(f.title, f.year), idx);
   });
 
   const newEntries: FilmEntry[] = [];
 
   for (const record of Object.values(archive.films)) {
-    const key = `${record.title.trim().toLowerCase()}::${record.year}`;
+    const key = normalizeFilmMatchKey(record.title, record.year);
     const matchIdx = existingByKey.get(key);
     if (matchIdx !== undefined) {
       updatedFilms[matchIdx] = filmRecordToFilmEntry(
@@ -157,22 +173,79 @@ export function syncArchiveIntoProfile(
 }
 
 /**
- * Syncs edits and additions from a FrameSheet ProfileAccount back into CineasteArchiveState.
+ * Propagates enriched poster URLs and production credits from `archive.films`
+ * into ALL loaded `ProfileAccount` entries so no film is ever scraped twice across profiles.
+ */
+export function propagateMetadataAcrossAllProfiles(
+  archive: CineasteArchiveState,
+  profiles: ProfileAccount[]
+): ProfileAccount[] {
+  const metaByKey = new Map<string, FilmRecord>();
+  for (const rec of Object.values(archive.films)) {
+    if (rec.metadata?.posterUrl || rec.metadata?.director) {
+      metaByKey.set(normalizeFilmMatchKey(rec.title, rec.year), rec);
+    }
+  }
+
+  if (metaByKey.size === 0) return profiles;
+
+  return profiles.map((prof) => {
+    let changed = false;
+    const nextFilms = prof.films.map((f) => {
+      const rec = metaByKey.get(normalizeFilmMatchKey(f.title, f.year));
+      if (!rec || !rec.metadata) return f;
+
+      const nextPoster = rec.metadata.posterUrl || f.posterUrl;
+      const nextDirector =
+        rec.metadata.director &&
+        (f.director === 'Archive Filmmaker' || !f.director)
+          ? rec.metadata.director
+          : f.director;
+      const nextCountry =
+        rec.metadata.country && (!f.country || f.country === 'International')
+          ? rec.metadata.country
+          : f.country;
+
+      if (
+        nextPoster !== f.posterUrl ||
+        nextDirector !== f.director ||
+        nextCountry !== f.country
+      ) {
+        changed = true;
+        return {
+          ...f,
+          posterUrl: nextPoster,
+          director: nextDirector,
+          country: nextCountry,
+        };
+      }
+      return f;
+    });
+
+    return changed ? { ...prof, films: nextFilms } : prof;
+  });
+}
+
+/**
+ * Syncs edits, additions, and deletions from a FrameSheet ProfileAccount back into CineasteArchiveState.
  */
 export function syncProfileFilmsIntoArchive(
   profileFilms: FilmEntry[],
-  archive: CineasteArchiveState
+  archive: CineasteArchiveState,
+  pruneDeleted = false
 ): CineasteArchiveState {
   const nextFilms: Record<string, FilmRecord> = { ...archive.films };
 
-  // Build lookup by title::year for existing archive records
+  // Build lookup by normalized title::year for existing archive records
   const archiveKeyToId = new Map<string, string>();
   for (const rec of Object.values(nextFilms)) {
-    archiveKeyToId.set(`${rec.title.trim().toLowerCase()}::${rec.year}`, rec.id);
+    archiveKeyToId.set(normalizeFilmMatchKey(rec.title, rec.year), rec.id);
   }
 
+  const seenArchiveIds = new Set<string>();
+
   for (const entry of profileFilms) {
-    const key = `${entry.title.trim().toLowerCase()}::${entry.year}`;
+    const key = normalizeFilmMatchKey(entry.title, entry.year);
     const existingId = archiveKeyToId.get(key) || makeFilmId(entry.title, entry.year);
     const existingRecord = nextFilms[existingId];
 
@@ -185,6 +258,30 @@ export function syncProfileFilmsIntoArchive(
 
     if (shouldIncludeInCatalog) {
       nextFilms[existingId] = filmEntryToFilmRecord(entry, existingRecord);
+      archiveKeyToId.set(key, existingId);
+      seenArchiveIds.add(existingId);
+    }
+  }
+
+  if (pruneDeleted) {
+    // Preserve any film still referenced by Yearly Rankings, Oscar Ballots, or Curated Lists
+    const protectedIds = new Set<string>();
+    for (const yr of Object.values(archive.yearlyRankings)) {
+      for (const e of yr.entries) protectedIds.add(e.filmId);
+    }
+    for (const ballot of Object.values(archive.oscarBallots)) {
+      for (const cat of Object.values(ballot.categories || {})) {
+        for (const nom of cat.nominees) protectedIds.add(nom.filmId);
+      }
+    }
+    for (const list of archive.lists) {
+      for (const e of list.entries) protectedIds.add(e.filmId);
+    }
+
+    for (const id of Object.keys(nextFilms)) {
+      if (!seenArchiveIds.has(id) && !protectedIds.has(id)) {
+        delete nextFilms[id];
+      }
     }
   }
 

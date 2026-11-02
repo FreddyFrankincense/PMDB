@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeftRight,
+  Award,
+  BarChart2,
   ChevronLeft,
   ChevronRight,
   ExternalLink,
@@ -8,6 +10,8 @@ import {
   Search,
 } from 'lucide-react';
 import { FilmEntry, ProfileAccount } from '../types/letterboxd';
+import { normalizeFilmMatchKey } from '../utils/unifiedArchiveSync';
+import { FilmGroupCohort } from './GroupHistogramPanel';
 
 interface ComparisonViewProps {
   profiles: ProfileAccount[];
@@ -16,6 +20,10 @@ interface ComparisonViewProps {
   onSelectPrimary: (id: string) => void;
   onSelectSecondary: (id: string) => void;
   onOpenImport: () => void;
+  onInspectFilm?: (film: FilmEntry) => void;
+  onOpenCohortInAnalytics?: (cohort: FilmGroupCohort) => void;
+  personalOscarByTitleYear?: Map<string, { nominations: string[]; wins: string[] }>;
+  personalYearRankByTitleYear?: Map<string, number>;
 }
 
 type CompareFilterTab =
@@ -50,6 +58,10 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
   onSelectPrimary,
   onSelectSecondary,
   onOpenImport,
+  onInspectFilm,
+  onOpenCohortInAnalytics,
+  personalOscarByTitleYear,
+  personalYearRankByTitleYear,
 }) => {
   const [activeTab, setActiveTab] = useState<CompareFilterTab>('all_shared');
   const [selectedGenreFilter, setSelectedGenreFilter] = useState<string>('ALL');
@@ -87,12 +99,12 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
 
     const mapA = new Map<string, FilmEntry>();
     profileA.films.forEach((f) => {
-      mapA.set(`${f.title.toLowerCase()}::${f.year}`, f);
+      mapA.set(normalizeFilmMatchKey(f.title, f.year), f);
     });
 
     const mapB = new Map<string, FilmEntry>();
     profileB.films.forEach((f) => {
-      mapB.set(`${f.title.toLowerCase()}::${f.year}`, f);
+      mapB.set(normalizeFilmMatchKey(f.title, f.year), f);
     });
 
     const shared: SharedFilmPair[] = [];
@@ -366,14 +378,35 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={onOpenImport}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium bg-slate-950 border border-slate-800 text-slate-200 rounded-md hover:border-slate-700 hover:bg-slate-800/60 transition-colors whitespace-nowrap shrink-0"
-        >
-          <Plus className="w-3.5 h-3.5 text-amber-400" />
-          Add Another Letterboxd Profile to Compare
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {onOpenCohortInAnalytics && comparison.shared.length > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                onOpenCohortInAnalytics({
+                  id: `compare-shared-${profileA.id}-${profileB.id}`,
+                  label: `Shared Films: @${profileA.username} ∩ @${profileB.username}`,
+                  description: `${comparison.shared.length.toLocaleString()} films logged by both @${profileA.username} and @${profileB.username} (${comparison.compatibilityScore}% taste agreement)`,
+                  sourceType: 'saved_group',
+                  films: comparison.shared.map((p) => p.filmA),
+                })
+              }
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <BarChart2 className="w-3.5 h-3.5" />
+              <span>Analyze {comparison.shared.length} Shared Films in Analytics Lab</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onOpenImport}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium bg-slate-950 border border-slate-800 text-slate-200 rounded-md hover:border-slate-700 hover:bg-slate-800/60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5 text-amber-400" />
+            <span>Add Another Letterboxd Profile to Compare</span>
+          </button>
+        </div>
       </div>
 
       {/* Overlap & Compatibility KPI Strip */}
@@ -643,53 +676,94 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
-                {paginatedShared.map((pair) => (
-                  <tr key={pair.key} className="h-9 hover:bg-slate-800/40">
-                    <td className="px-4 py-1.5 font-medium text-slate-100">
-                      <div className="flex items-center gap-2">
-                        <span>{pair.title}</span>
-                        <a
-                          href={pair.letterboxdUri}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-slate-500 hover:text-amber-400"
-                        >
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      </div>
-                    </td>
-                    <td className="px-3 py-1.5 text-right font-mono tabular-nums text-slate-400">
-                      {pair.year}
-                    </td>
-                    <td className="px-3 py-1.5 text-slate-300">
-                      {pair.genres.join(' · ')}
-                    </td>
-                    <td className="px-3 py-1.5 text-right font-mono tabular-nums font-semibold text-amber-400">
-                      {pair.ratingA.toFixed(1)} ★
-                    </td>
-                    <td className="px-3 py-1.5 text-right font-mono tabular-nums font-semibold text-sky-400">
-                      {pair.ratingB.toFixed(1)} ★
-                    </td>
-                    <td
-                      className={`px-3 py-1.5 text-right font-mono tabular-nums font-medium ${
-                        pair.absDelta === 0
-                          ? 'text-emerald-400'
-                          : pair.absDelta <= 0.5
-                          ? 'text-slate-300'
-                          : 'text-rose-400'
-                      }`}
-                    >
-                      {pair.delta === 0
-                        ? 'Exact Match (0.0★)'
-                        : pair.delta > 0
-                        ? `+${pair.delta.toFixed(1)}★ (@${profileA.username})`
-                        : `${pair.delta.toFixed(1)}★ (@${profileB.username})`}
-                    </td>
-                    <td className="px-4 py-1.5 text-slate-400 truncate max-w-xs">
-                      {pair.director}
-                    </td>
-                  </tr>
-                ))}
+                {paginatedShared.map((pair) => {
+                  const oscarInfo =
+                    personalOscarByTitleYear?.get(pair.key) ||
+                    personalOscarByTitleYear?.get(`${pair.title.trim().toLowerCase()}::${pair.year}`);
+                  const yearRank =
+                    personalYearRankByTitleYear?.get(pair.key) ||
+                    personalYearRankByTitleYear?.get(`${pair.title.trim().toLowerCase()}::${pair.year}`);
+
+                  return (
+                    <tr key={pair.key} className="h-9 hover:bg-slate-800/40">
+                      <td className="px-4 py-1.5 font-medium text-slate-100">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {onInspectFilm ? (
+                            <button
+                              type="button"
+                              onClick={() => onInspectFilm(pair.filmA)}
+                              className="hover:text-amber-300 text-left transition-colors cursor-pointer"
+                              title="Inspect in PMDB Film Dossier"
+                            >
+                              {pair.title}
+                            </button>
+                          ) : (
+                            <span>{pair.title}</span>
+                          )}
+                          <a
+                            href={pair.letterboxdUri}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-slate-500 hover:text-amber-400"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                          {yearRank && (
+                            <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-slate-800 text-amber-300 border border-slate-700">
+                              #{yearRank} in {pair.year}
+                            </span>
+                          )}
+                          {oscarInfo && oscarInfo.nominations.length > 0 && (
+                            <span
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono rounded border ${
+                                oscarInfo.wins.length > 0
+                                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                                  : 'bg-slate-800 text-slate-300 border-slate-700'
+                              }`}
+                            >
+                              <Award className="w-2.5 h-2.5" />
+                              <span>
+                                {oscarInfo.wins.length > 0
+                                  ? `Winner · ${oscarInfo.wins.length}W/${oscarInfo.nominations.length}N`
+                                  : `Nominee · ${oscarInfo.nominations.length}N`}
+                              </span>
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-1.5 text-right font-mono tabular-nums text-slate-400">
+                        {pair.year}
+                      </td>
+                      <td className="px-3 py-1.5 text-slate-300">
+                        {pair.genres.join(' · ')}
+                      </td>
+                      <td className="px-3 py-1.5 text-right font-mono tabular-nums font-semibold text-amber-400">
+                        {pair.ratingA.toFixed(1)} ★
+                      </td>
+                      <td className="px-3 py-1.5 text-right font-mono tabular-nums font-semibold text-sky-400">
+                        {pair.ratingB.toFixed(1)} ★
+                      </td>
+                      <td
+                        className={`px-3 py-1.5 text-right font-mono tabular-nums font-medium ${
+                          pair.absDelta === 0
+                            ? 'text-emerald-400'
+                            : pair.absDelta <= 0.5
+                            ? 'text-slate-300'
+                            : 'text-rose-400'
+                        }`}
+                      >
+                        {pair.delta === 0
+                          ? 'Exact Match (0.0★)'
+                          : pair.delta > 0
+                          ? `+${pair.delta.toFixed(1)}★ (@${profileA.username})`
+                          : `${pair.delta.toFixed(1)}★ (@${profileB.username})`}
+                      </td>
+                      <td className="px-4 py-1.5 text-slate-400 truncate max-w-xs">
+                        {pair.director}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -713,7 +787,18 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
                 {paginatedExclusive.map((film) => (
                   <tr key={film.id} className="h-9 hover:bg-slate-800/40">
                     <td className="px-4 py-1.5 font-medium text-slate-100">
-                      {film.title}
+                      {onInspectFilm ? (
+                        <button
+                          type="button"
+                          onClick={() => onInspectFilm(film)}
+                          className="hover:text-amber-300 text-left transition-colors cursor-pointer"
+                          title="Inspect in PMDB Film Dossier"
+                        >
+                          {film.title}
+                        </button>
+                      ) : (
+                        film.title
+                      )}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono tabular-nums text-slate-400">
                       {film.year}

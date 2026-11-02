@@ -89,7 +89,13 @@ export function parseLetterboxdCsvFiles(
     if (rows.length < 2) continue;
 
     const isWatchlistFile = file.filename.toLowerCase().includes('watchlist');
-    const headers = rows[0].map((h) => h.toLowerCase().trim());
+    // Support Letterboxd List CSVs where "Position,Name,Year" appears after a metadata header block
+    const listHeaderRowIndex = rows.findIndex((r) => {
+      const lower = r.map((c) => c.toLowerCase().trim());
+      return lower.includes('position') && lower.includes('name') && lower.includes('year');
+    });
+    const headerRowIndex = listHeaderRowIndex >= 0 ? listHeaderRowIndex : 0;
+    const headers = rows[headerRowIndex].map((h) => h.toLowerCase().trim());
 
     const nameIdx = headers.findIndex(
       (h) => h === 'name' || h === 'title' || h === 'film'
@@ -105,12 +111,14 @@ export function parseLetterboxdCsvFiles(
     const tagsIdx = headers.findIndex((h) => h === 'tags');
     const watchedDateIdx = headers.findIndex((h) => h === 'watched date');
     const dateIdx = headers.findIndex((h) => h === 'date');
-    const reviewIdx = headers.findIndex((h) => h === 'review' || h === 'notes');
+    const reviewIdx = headers.findIndex(
+      (h) => h === 'review' || h === 'notes' || h === 'description'
+    );
     const likedIdx = headers.findIndex((h) => h === 'liked');
 
     if (nameIdx === -1) continue;
 
-    for (let r = 1; r < rows.length; r++) {
+    for (let r = headerRowIndex + 1; r < rows.length; r++) {
       const row = rows[r];
       const rawTitle = row[nameIdx]?.trim();
       if (!rawTitle) continue;

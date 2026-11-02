@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Award,
+  BarChart2,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -18,11 +19,20 @@ import {
   INDUSTRY_AND_CRITIC_LISTS,
 } from '../data/industryLists';
 import { FilmEntry, ProfileAccount } from '../types/letterboxd';
+import { normalizeFilmMatchKey } from '../utils/unifiedArchiveSync';
+import { FilmGroupCohort } from './GroupHistogramPanel';
 
 interface ExternalListsViewProps {
   profile: ProfileAccount;
   onUpdateFilms: (films: FilmEntry[]) => void;
   onNavigateToPersonalOscarBallots?: (year?: number) => void;
+  onInspectFilm?: (title: string, year: number, director?: string) => void;
+  onOpenCohortInAnalytics?: (cohort: FilmGroupCohort) => void;
+  personalOscarByTitleYear?: Record<
+    string,
+    { nominations: string[]; wins: string[]; isBestPictureWinner: boolean }
+  >;
+  personalYearRankByTitleYear?: Record<string, number>;
 }
 
 type CategoryFilter = 'all' | ExternalListCategory;
@@ -35,6 +45,10 @@ export const ExternalListsView: React.FC<ExternalListsViewProps> = ({
   profile,
   onUpdateFilms,
   onNavigateToPersonalOscarBallots,
+  onInspectFilm,
+  onOpenCohortInAnalytics,
+  personalOscarByTitleYear = {},
+  personalYearRankByTitleYear = {},
 }) => {
   const [customLists, setCustomLists] = useState<ExternalCanonicalList[]>([]);
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
@@ -81,7 +95,9 @@ export const ExternalListsView: React.FC<ExternalListsViewProps> = ({
     const exactMap = new Map<string, FilmEntry>();
     const titleOnlyMap = new Map<string, FilmEntry>();
     profile.films.forEach((f) => {
+      const normKey = normalizeFilmMatchKey(f.title, f.year);
       const normTitle = f.title.trim().toLowerCase();
+      exactMap.set(normKey, f);
       exactMap.set(`${normTitle}::${f.year}`, f);
       if (!titleOnlyMap.has(normTitle)) {
         titleOnlyMap.set(normTitle, f);
@@ -405,20 +421,10 @@ export const ExternalListsView: React.FC<ExternalListsViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {onNavigateToPersonalOscarBallots && (
-            <button
-              type="button"
-              onClick={() => onNavigateToPersonalOscarBallots()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-amber-500/15 border border-amber-500/40 text-amber-300 rounded-md hover:bg-amber-500/25 transition-colors whitespace-nowrap shrink-0"
-            >
-              <Award className="w-3.5 h-3.5 text-amber-400" />
-              <span>Open Personal Oscar Ballots (1927–2026)</span>
-            </button>
-          )}
           <button
             type="button"
             onClick={() => setShowCustomBuilder((v) => !v)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-950 border border-slate-800 text-slate-200 rounded-md hover:border-slate-700 transition-colors whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-950 border border-slate-800 text-slate-200 rounded-md hover:border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
             <Plus className="w-3.5 h-3.5 text-amber-400" />
             Add Custom Awards / Periodical List
@@ -584,6 +590,30 @@ export const ExternalListsView: React.FC<ExternalListsViewProps> = ({
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">{activeList.description}</p>
           </div>
+
+          {onOpenCohortInAnalytics && summary.watchedCount > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                const watchedFilms = activeListEvaluated.rows
+                  .filter((r) => r.watched && r.userFilm)
+                  .map((r) => r.userFilm!);
+                if (watchedFilms.length > 0) {
+                  onOpenCohortInAnalytics({
+                    id: `external-list-${activeList.id}`,
+                    label: `${activeList.shortName} (Watched)`,
+                    description: `${watchedFilms.length} watched films from ${activeList.title}`,
+                    sourceType: 'group_section',
+                    films: watchedFilms,
+                  });
+                }
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-950 hover:bg-slate-800 text-amber-300 border border-amber-500/40 rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <BarChart2 className="w-3.5 h-3.5" />
+              <span>Analyze {summary.watchedCount} Seen Films in Analytics Lab</span>
+            </button>
+          )}
         </div>
 
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
@@ -767,24 +797,34 @@ export const ExternalListsView: React.FC<ExternalListsViewProps> = ({
           <table className="w-full text-left border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-slate-950">
               <tr className="border-b border-slate-800 text-[11px] text-slate-400">
-                <th className="py-2.5 px-3 w-14 text-right">#</th>
-                <th className="py-2.5 px-3 w-28">Status</th>
-                <th className="py-2.5 px-3 min-w-[200px]">Film Title</th>
+                <th className="py-2.5 px-3 w-12 text-right">#</th>
+                <th className="py-2.5 px-3 w-28">Official Status</th>
+                <th className="py-2.5 px-3 min-w-[190px]">Film Title</th>
                 <th className="py-2.5 px-2.5 w-16 text-right">Year</th>
-                <th className="py-2.5 px-3 min-w-[160px]">Ceremony / Issue</th>
-                <th className="py-2.5 px-3 min-w-[240px]">Accolade / Poll Distinction</th>
+                <th className="py-2.5 px-3 min-w-[150px]">Ceremony / Issue</th>
+                <th className="py-2.5 px-3 min-w-[220px]">Official Accolade / Distinction</th>
+                <th className="py-2.5 px-3 min-w-[195px] text-amber-300">
+                  Your Personal Ballot & Year Rank
+                </th>
                 <th className="py-2.5 px-3 w-36 text-right text-amber-400">
                   @{profile.username} Rating
                 </th>
-                <th className="py-2.5 px-3 w-28 text-right">Your Sheet Rank</th>
-                <th className="py-2.5 px-3 w-32 text-right">vs. Consensus</th>
+                <th className="py-2.5 px-3 w-28 text-right">vs. Consensus</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
-              {paginatedRows.map(({ entry, watched, userFilm, userRating, delta }) => (
+              {paginatedRows.map(({ entry, watched, userRating, delta }) => {
+                const normKey = normalizeFilmMatchKey(entry.title, entry.year);
+                const legacyKey = `${entry.title.trim().toLowerCase()}::${entry.year}`;
+                const personalOscar =
+                  personalOscarByTitleYear[normKey] || personalOscarByTitleYear[legacyKey];
+                const personalYearRank =
+                  personalYearRankByTitleYear[normKey] ?? personalYearRankByTitleYear[legacyKey];
+
+                return (
                 <tr
                   key={`${entry.title}-${entry.year}-${entry.rank}`}
-                  className={`h-10 transition-colors ${
+                  className={`h-11 transition-colors ${
                     watched ? 'hover:bg-slate-800/40' : 'bg-slate-950/30 hover:bg-slate-800/30'
                   }`}
                 >
@@ -821,7 +861,18 @@ export const ExternalListsView: React.FC<ExternalListsViewProps> = ({
                   </td>
 
                   <td className="px-3 py-1.5">
-                    <div className="font-medium text-slate-100">{entry.title}</div>
+                    {onInspectFilm ? (
+                      <button
+                        type="button"
+                        onClick={() => onInspectFilm(entry.title, entry.year, entry.director)}
+                        className="font-medium text-slate-100 hover:text-amber-300 text-left transition-colors cursor-pointer"
+                        title="Open unified Film Dossier & Credits modal"
+                      >
+                        {entry.title}
+                      </button>
+                    ) : (
+                      <div className="font-medium text-slate-100">{entry.title}</div>
+                    )}
                     <div className="text-[11px] text-slate-500">{entry.director}</div>
                   </td>
 
@@ -837,6 +888,39 @@ export const ExternalListsView: React.FC<ExternalListsViewProps> = ({
                         <Award className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                       )}
                       <span>{entry.accoladeDetail}</span>
+                    </div>
+                  </td>
+
+                  <td className="px-3 py-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {personalOscar && personalOscar.nominations.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => onNavigateToPersonalOscarBallots?.(entry.year)}
+                          className="inline-flex items-center gap-1 text-[11px] font-mono tabular-nums text-amber-300 hover:text-amber-200 underline cursor-pointer"
+                          title={`Personal Categories: ${personalOscar.nominations.join(', ')}`}
+                        >
+                          <Award className="w-3 h-3 text-amber-400 shrink-0" />
+                          <span>
+                            {personalOscar.wins.length > 0
+                              ? `★ ${personalOscar.wins.length}W / ${personalOscar.nominations.length}N`
+                              : `${personalOscar.nominations.length} Personal Nom`}
+                          </span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => onNavigateToPersonalOscarBallots?.(entry.year)}
+                          className="text-[11px] font-mono text-slate-500 hover:text-amber-300 cursor-pointer"
+                        >
+                          + Ballot ({entry.year}) →
+                        </button>
+                      )}
+                      {personalYearRank && (
+                        <span className="text-[11px] font-mono tabular-nums text-emerald-400">
+                          · #{personalYearRank} in {entry.year}
+                        </span>
+                      )}
                     </div>
                   </td>
 
@@ -862,17 +946,6 @@ export const ExternalListsView: React.FC<ExternalListsViewProps> = ({
                     </select>
                   </td>
 
-                  <td className="px-3 py-1.5 text-right font-mono tabular-nums text-slate-400">
-                    {userFilm ? (
-                      <span>
-                        #{userFilm.customRank ?? '—'} ·{' '}
-                        <strong className="text-slate-200">{userFilm.tier}</strong>
-                      </span>
-                    ) : (
-                      <span className="text-slate-600">Unseen</span>
-                    )}
-                  </td>
-
                   <td
                     className={`px-3 py-1.5 text-right font-mono tabular-nums ${
                       delta === null
@@ -891,7 +964,8 @@ export const ExternalListsView: React.FC<ExternalListsViewProps> = ({
                       : `${delta.toFixed(1)}★`}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

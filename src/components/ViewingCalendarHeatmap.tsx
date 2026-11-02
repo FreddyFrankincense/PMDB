@@ -309,7 +309,7 @@ export const ViewingCalendarHeatmap: React.FC<ViewingCalendarHeatmapProps> = ({
             ))}
           </div>
 
-          <div className="flex items-center gap-1 p-0.5 bg-slate-950 border border-slate-800 rounded-md overflow-x-auto max-w-full">
+          <div className="flex flex-wrap items-center gap-1 p-0.5 bg-slate-950 border border-slate-800 rounded-md">
             {availableYears.slice(0, 7).map((yr) => {
               const count = yearCounts.get(yr) || 0;
               const isSelected = yr === activeYear;

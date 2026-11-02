@@ -2,14 +2,17 @@ import React, { useState } from 'react';
 import {
   CheckCircle2,
   Code2,
+  Database,
   Download,
   ExternalLink,
   FileSpreadsheet,
   Globe,
   Loader2,
+  RefreshCw,
   Trash2,
   Upload,
 } from 'lucide-react';
+import { CineasteArchiveState } from '../types/cinema';
 import { ExternalScrapeResponse, ProfileAccount } from '../types/letterboxd';
 import { cloneFilmsArray } from '../utils/baselineDiff';
 import {
@@ -25,6 +28,18 @@ interface DataSourcesViewProps {
   onAddOrUpdateProfile: (profile: ProfileAccount, setAsActive: boolean) => void;
   onDeleteProfile: (id: string) => void;
   onSelectActiveProfile: (id: string) => void;
+  archive?: CineasteArchiveState;
+  onImportCsvToArchive?: (files: { fileName: string; content: string }[]) => {
+    listsImported: number;
+    reviewsImported: number;
+  };
+  onRestoreUnifiedWorkspace?: (payload: {
+    archive?: CineasteArchiveState;
+    profiles?: ProfileAccount[];
+  }) => void;
+  isBatchEnriching?: boolean;
+  enrichProgress?: { done: number; total: number };
+  onTriggerBatchEnrich?: () => void;
 }
 
 const SAMPLE_LETTERBOXD_CSV = `Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date
@@ -45,6 +60,12 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
   onAddOrUpdateProfile,
   onDeleteProfile,
   onSelectActiveProfile,
+  archive,
+  onImportCsvToArchive,
+  onRestoreUnifiedWorkspace,
+  isBatchEnriching = false,
+  enrichProgress = { done: 0, total: 0 },
+  onTriggerBatchEnrich,
 }) => {
   const [scrapeInput, setScrapeInput] = useState('');
   const [scrapeLoading, setScrapeLoading] = useState(false);
@@ -55,13 +76,14 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
 
   const [csvUsername, setCsvUsername] = useState('');
   const [csvDisplayName, setCsvDisplayName] = useState('');
-  const [csvTargetMode, setCsvTargetMode] = useState<'new' | 'merge'>('new');
+  const [csvTargetMode, setCsvTargetMode] = useState<'merge' | 'new'>('merge');
   const [uploadedFiles, setUploadedFiles] = useState<{ filename: string; content: string }[]>([]);
   const [csvStatus, setCsvStatus] = useState<string | null>(null);
 
   const [rawPasteUsername, setRawPasteUsername] = useState('');
   const [rawPasteContent, setRawPasteContent] = useState('');
   const [rawPasteLoading, setRawPasteLoading] = useState(false);
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
 
   const handleExternalFetch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -134,6 +156,18 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
     const parsedFilms = parseLetterboxdCsvFiles(uploadedFiles);
     const detectedStructure = extractImportedCsvStructure(uploadedFiles);
 
+    // Also ingest into CineasteArchiveState so any lists/*.csv or reviews.csv populate Curated Lists & Archive
+    const archiveSummary = onImportCsvToArchive
+      ? onImportCsvToArchive(
+          uploadedFiles.map((f) => ({ fileName: f.filename, content: f.content }))
+        )
+      : { listsImported: 0, reviewsImported: 0 };
+
+    const extraSummary =
+      archiveSummary.listsImported > 0 || archiveSummary.reviewsImported > 0
+        ? ` · ${archiveSummary.listsImported} curated list(s) & ${archiveSummary.reviewsImported} review(s) synced`
+        : '';
+
     if (csvTargetMode === 'merge') {
       const target = profiles.find((p) => p.id === activeProfileId);
       if (target) {
@@ -158,7 +192,7 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
           true
         );
         setCsvStatus(
-          `Merged ${parsedFilms.length} CSV entries into @${target.username} (${combined.length} total films). Schema preserved: ${detectedStructure.headers.join(', ')}`
+          `Merged ${parsedFilms.length} CSV entries into @${target.username} (${combined.length} total films${extraSummary}). Schema preserved: ${detectedStructure.headers.join(', ')}`
         );
         setUploadedFiles([]);
         return;
@@ -187,7 +221,7 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
 
     onAddOrUpdateProfile(newProfile, true);
     setCsvStatus(
-      `Imported ${parsedFilms.length} films into new profile @${cleanUser} (Matched export headers: ${detectedStructure.headers.join(', ')}).`
+      `Imported ${parsedFilms.length} films into new profile @${cleanUser}${extraSummary} (Matched export headers: ${detectedStructure.headers.join(', ')}).`
     );
     setUploadedFiles([]);
     setCsvUsername('');
@@ -272,6 +306,50 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
       setRawPasteLoading(false);
     }
   };
+
+  const handleExportUnifiedBackupJson = () => {
+    const payload = {
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      archive,
+      profiles,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pmdb-workspace-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setBackupNotice('Exported complete PMDB workspace JSON backup (Catalog, Rankings, Oscar Ballots, Lists & Profiles).');
+  };
+
+  const handleRestoreBackupJson = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !onRestoreUnifiedWorkspace) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      if (parsed.archive || parsed.profiles) {
+        onRestoreUnifiedWorkspace({
+          archive: parsed.archive,
+          profiles: parsed.profiles,
+        });
+        setBackupNotice('Restored PMDB unified workspace backup successfully.');
+      } else if (parsed.films && parsed.oscarBallots) {
+        onRestoreUnifiedWorkspace({ archive: parsed });
+        setBackupNotice('Restored PMDB archive backup successfully.');
+      }
+    } catch {
+      setBackupNotice('Invalid JSON backup file.');
+    }
+  };
+
+  const archiveFilmsList = archive ? Object.values(archive.films) : [];
+  const enrichedPosterCount = archiveFilmsList.filter((f) => Boolean(f.metadata?.posterUrl)).length;
+  const unenrichedCount = Math.max(0, archiveFilmsList.length - enrichedPosterCount);
 
   return (
     <div className="space-y-6">
@@ -388,7 +466,7 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
               </h3>
             </div>
             <p className="text-xs text-slate-400 mb-4">
-              Enter any public Letterboxd username or profile URL. Queries the account&apos;s public RSS feed and film diary pages externally.
+              Enter any public Letterboxd username or profile URL. Queries the account&apos;s public RSS feed and film diary pages externally and shares cached posters &amp; credits across the workspace.
             </p>
 
             <form onSubmit={handleExternalFetch} className="space-y-3">
@@ -476,14 +554,14 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
           </div>
         </div>
 
-        {/* Method 2: Letterboxd CSV Archive Importer */}
+        {/* Method 2: Unified Letterboxd CSV Archive & List Importer */}
         <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between gap-2 mb-1">
               <div className="flex items-center gap-2">
                 <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
                 <h3 className="text-sm font-display font-semibold text-slate-100">
-                  2. Import Letterboxd CSV Export Files
+                  2. Import Letterboxd CSV Export &amp; List Files
                 </h3>
               </div>
               <button
@@ -499,23 +577,13 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
               Upload <code className="font-mono text-slate-300">diary.csv</code>,{' '}
               <code className="font-mono text-slate-300">ratings.csv</code>,{' '}
               <code className="font-mono text-slate-300">watched.csv</code>,{' '}
-              <code className="font-mono text-slate-300">reviews.csv</code>, or{' '}
-              <code className="font-mono text-sky-300">watchlist.csv</code> exported from Letterboxd.
+              <code className="font-mono text-slate-300">reviews.csv</code>,{' '}
+              <code className="font-mono text-sky-300">watchlist.csv</code>, or{' '}
+              <code className="font-mono text-amber-300">lists/*.csv</code> exported from Letterboxd. Simultaneously populates your Poster Catalog, FrameSheet Spreadsheet, Reviews Anthology, and Curated Lists.
             </p>
 
             <form onSubmit={handleCsvImportSubmit} className="space-y-3">
               <div className="flex items-center gap-2 p-1 bg-slate-950 border border-slate-800 rounded-lg w-fit">
-                <button
-                  type="button"
-                  onClick={() => setCsvTargetMode('new')}
-                  className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                    csvTargetMode === 'new'
-                      ? 'bg-slate-800 text-slate-100'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Create New Profile
-                </button>
                 <button
                   type="button"
                   onClick={() => setCsvTargetMode('merge')}
@@ -526,6 +594,17 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
                   }`}
                 >
                   Merge into Active Profile
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCsvTargetMode('new')}
+                  className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
+                    csvTargetMode === 'new'
+                      ? 'bg-slate-800 text-slate-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Create New Profile
                 </button>
               </div>
 
@@ -561,10 +640,10 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
               <label className="flex flex-col items-center justify-center border border-dashed border-slate-700 hover:border-amber-500/60 bg-slate-950/60 rounded-lg p-6 cursor-pointer transition-colors text-center">
                 <Upload className="w-5 h-5 text-slate-400 mb-2" />
                 <span className="text-xs font-medium text-slate-200">
-                  Click to select Letterboxd CSV files
+                  Click to select Letterboxd CSV files (or Lists CSVs)
                 </span>
                 <span className="text-[11px] text-slate-500 mt-0.5">
-                  Supports diary.csv, ratings.csv, watched.csv, reviews.csv, watchlist.csv
+                  Supports diary.csv, ratings.csv, watched.csv, reviews.csv, watchlist.csv, lists/*.csv
                 </span>
                 <input
                   type="file"
@@ -605,7 +684,7 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
                 disabled={uploadedFiles.length === 0}
                 className="w-full py-2 text-xs font-medium bg-emerald-500 text-slate-950 rounded-md hover:bg-emerald-400 disabled:opacity-40 transition-colors"
               >
-                Import & Enrich CSV Data
+                Import &amp; Sync CSV Data Across Workspace
               </button>
             </form>
 
@@ -620,8 +699,94 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
           <div className="mt-6 pt-4 border-t border-slate-800 text-xs text-slate-500">
             Supported Letterboxd CSV columns:{' '}
             <span className="font-mono text-slate-400">
-              Date · Name · Year · Letterboxd URI · Rating · Rewatch · Tags · Watched Date
+              Date · Name · Year · Letterboxd URI · Rating · Rewatch · Review · Tags · Watched Date · Position
             </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Deduplicated Public Metadata Enrichment & Full Workspace JSON Backup */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <RefreshCw
+                className={`w-4 h-4 text-amber-400 ${isBatchEnriching ? 'animate-spin' : ''}`}
+              />
+              <h3 className="text-sm font-display font-semibold text-slate-100">
+                3. Deduplicated Public Poster &amp; Credits Engine (IMDb · Wikipedia · iTunes)
+              </h3>
+            </div>
+            <p className="text-xs text-slate-400 mb-4">
+              Fetches theatrical posters and above/below-the-line credits (Director, Screenplay, Cast, Cinematographer, Composer, Editor) using a unified server cache so no film is ever scraped twice across profiles.
+            </p>
+            <div className="p-3 bg-slate-950 border border-slate-800 rounded-md flex items-center justify-between text-xs font-mono tabular-nums text-slate-300 mb-4">
+              <span>
+                Enriched Posters &amp; Credits: <strong className="text-emerald-400">{enrichedPosterCount}</strong> / {archiveFilmsList.length} catalog films
+              </span>
+              <span className="text-amber-300">
+                {unenrichedCount} remaining
+              </span>
+            </div>
+          </div>
+
+          {onTriggerBatchEnrich && (
+            <button
+              type="button"
+              onClick={onTriggerBatchEnrich}
+              disabled={isBatchEnriching || unenrichedCount === 0}
+              className="w-full py-2 text-xs font-medium bg-amber-500 text-slate-950 rounded-md hover:bg-amber-400 disabled:opacity-40 transition-colors inline-flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isBatchEnriching ? 'animate-spin' : ''}`} />
+              <span>
+                {isBatchEnriching
+                  ? `Batch Enriching (${enrichProgress.done}/${enrichProgress.total})...`
+                  : unenrichedCount === 0
+                  ? 'All Catalog Films Enriched with Posters ✓'
+                  : `Batch Enrich Next ${Math.min(30, unenrichedCount)} Films in Single Request`}
+              </span>
+            </button>
+          )}
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <Database className="w-4 h-4 text-sky-400" />
+              <h3 className="text-sm font-display font-semibold text-slate-100">
+                4. Full Unified Workspace JSON Backup &amp; Restore
+              </h3>
+            </div>
+            <p className="text-xs text-slate-400 mb-4">
+              Save or restore your entire combined workspace — including all loaded Letterboxd profiles, Source-of-Truth baselines, Annual Ranked Lists (1927–2026), Personal Oscar Ballots, and Curated Lists — in a single JSON file.
+            </p>
+            {backupNotice && (
+              <div className="p-2.5 mb-3 rounded bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
+                {backupNotice}
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleExportUnifiedBackupJson}
+              className="flex-1 py-2 px-3 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-md transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5 text-amber-400" />
+              <span>Export Full Workspace (.json)</span>
+            </button>
+
+            <label className="flex-1 py-2 px-3 text-xs font-medium bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-md transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer">
+              <Upload className="w-3.5 h-3.5 text-sky-400" />
+              <span>Restore Backup (.json)</span>
+              <input
+                type="file"
+                accept=".json,application/json"
+                onChange={handleRestoreBackupJson}
+                className="hidden"
+              />
+            </label>
           </div>
         </div>
       </div>

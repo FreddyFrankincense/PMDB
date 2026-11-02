@@ -497,6 +497,31 @@ export function createInitialSeedArchive(): CineasteArchiveState {
           },
         ],
       },
+      1954: {
+        year: 1954,
+        summaryEssay:
+          'A golden crossroads of post-war world cinema—Kurosawa’s epic kineticism, Hitchcock’s pure visual suspense, and Kazan’s method naturalism.',
+        entries: [
+          {
+            filmId: makeFilmId('Seven Samurai', 1954),
+            rank: 1,
+            tier: 'Masterpiece',
+            curatorNote: 'Unmatched telephoto action editing and moral architecture.',
+          },
+          {
+            filmId: makeFilmId('Rear Window', 1954),
+            rank: 2,
+            tier: 'Masterpiece',
+            curatorNote: 'Pure Kuleshov montage inside a single courtyard.',
+          },
+          {
+            filmId: makeFilmId('On the Waterfront', 1954),
+            rank: 3,
+            tier: 'Essential',
+            curatorNote: 'Brando and Saint in wintery Hoboken.',
+          },
+        ],
+      },
       1975: {
         year: 1975,
         summaryEssay:
@@ -928,6 +953,370 @@ export function createInitialSeedArchive(): CineasteArchiveState {
                 filmId: makeFilmId('Past Lives', 2023),
                 recipientName: 'Greta Lee',
                 roleOrDetail: 'as Nora Moon',
+              },
+            ],
+          },
+        },
+      },
+      1941: {
+        year: 1941,
+        ceremonyNotes: '14th Academy Awards Personal Retrospective Ballot',
+        categories: {
+          'best-picture': {
+            categoryId: 'best-picture',
+            winnerNomineeId: 'nom-1941-pic-1',
+            nominees: [
+              {
+                id: 'nom-1941-pic-1',
+                filmId: makeFilmId('Citizen Kane', 1941),
+                recipientName: 'Orson Welles / Mercury Productions',
+              },
+              {
+                id: 'nom-1941-pic-2',
+                filmId: makeFilmId('The Maltese Falcon', 1941),
+                recipientName: 'Hal B. Wallis, Producer',
+              },
+              {
+                id: 'nom-1941-pic-3',
+                filmId: makeFilmId('How Green Was My Valley', 1941),
+                recipientName: 'Darryl F. Zanuck, Producer',
+              },
+            ],
+          },
+          'best-director': {
+            categoryId: 'best-director',
+            winnerNomineeId: 'nom-1941-dir-1',
+            nominees: [
+              {
+                id: 'nom-1941-dir-1',
+                filmId: makeFilmId('Citizen Kane', 1941),
+                recipientName: 'Orson Welles',
+              },
+              {
+                id: 'nom-1941-dir-2',
+                filmId: makeFilmId('How Green Was My Valley', 1941),
+                recipientName: 'John Ford',
+              },
+              {
+                id: 'nom-1941-dir-3',
+                filmId: makeFilmId('The Maltese Falcon', 1941),
+                recipientName: 'John Huston',
+              },
+            ],
+          },
+        },
+      },
+      1954: {
+        year: 1954,
+        ceremonyNotes: '27th Academy Awards Personal Retrospective Ballot',
+        categories: {
+          'best-picture': {
+            categoryId: 'best-picture',
+            winnerNomineeId: 'nom-1954-pic-1',
+            nominees: [
+              {
+                id: 'nom-1954-pic-1',
+                filmId: makeFilmId('Seven Samurai', 1954),
+                recipientName: 'Sojiro Motoki / Toho',
+              },
+              {
+                id: 'nom-1954-pic-2',
+                filmId: makeFilmId('Rear Window', 1954),
+                recipientName: 'Alfred Hitchcock, Producer',
+              },
+              {
+                id: 'nom-1954-pic-3',
+                filmId: makeFilmId('On the Waterfront', 1954),
+                recipientName: 'Sam Spiegel, Producer',
+              },
+            ],
+          },
+          'best-director': {
+            categoryId: 'best-director',
+            winnerNomineeId: 'nom-1954-dir-2',
+            nominees: [
+              {
+                id: 'nom-1954-dir-1',
+                filmId: makeFilmId('Seven Samurai', 1954),
+                recipientName: 'Akira Kurosawa',
+              },
+              {
+                id: 'nom-1954-dir-2',
+                filmId: makeFilmId('Rear Window', 1954),
+                recipientName: 'Alfred Hitchcock',
+              },
+              {
+                id: 'nom-1954-dir-3',
+                filmId: makeFilmId('On the Waterfront', 1954),
+                recipientName: 'Elia Kazan',
+              },
+            ],
+          },
+          'best-actor': {
+            categoryId: 'best-actor',
+            winnerNomineeId: 'nom-1954-act-1',
+            nominees: [
+              {
+                id: 'nom-1954-act-1',
+                filmId: makeFilmId('On the Waterfront', 1954),
+                recipientName: 'Marlon Brando',
+                roleOrDetail: 'as Terry Malloy',
+              },
+              {
+                id: 'nom-1954-act-2',
+                filmId: makeFilmId('Seven Samurai', 1954),
+                recipientName: 'Takashi Shimura',
+                roleOrDetail: 'as Kambei Shimada',
+              },
+              {
+                id: 'nom-1954-act-3',
+                filmId: makeFilmId('Rear Window', 1954),
+                recipientName: 'James Stewart',
+                roleOrDetail: 'as L. B. Jefferies',
+              },
+            ],
+          },
+        },
+      },
+      1972: {
+        year: 1972,
+        ceremonyNotes: '45th Academy Awards Personal Retrospective Ballot',
+        categories: {
+          'best-picture': {
+            categoryId: 'best-picture',
+            winnerNomineeId: 'nom-1972-pic-1',
+            nominees: [
+              {
+                id: 'nom-1972-pic-1',
+                filmId: makeFilmId('The Godfather', 1972),
+                recipientName: 'Albert S. Ruddy, Producer',
+              },
+              {
+                id: 'nom-1972-pic-2',
+                filmId: makeFilmId('Aguirre, the Wrath of God', 1972),
+                recipientName: 'Werner Herzog, Producer',
+              },
+              {
+                id: 'nom-1972-pic-3',
+                filmId: makeFilmId('Solaris', 1972),
+                recipientName: 'Viacheslav Tarasov, Producer',
+              },
+            ],
+          },
+          'best-director': {
+            categoryId: 'best-director',
+            winnerNomineeId: 'nom-1972-dir-1',
+            nominees: [
+              {
+                id: 'nom-1972-dir-1',
+                filmId: makeFilmId('The Godfather', 1972),
+                recipientName: 'Francis Ford Coppola',
+              },
+              {
+                id: 'nom-1972-dir-2',
+                filmId: makeFilmId('Solaris', 1972),
+                recipientName: 'Andrei Tarkovsky',
+              },
+              {
+                id: 'nom-1972-dir-3',
+                filmId: makeFilmId('Aguirre, the Wrath of God', 1972),
+                recipientName: 'Werner Herzog',
+              },
+            ],
+          },
+        },
+      },
+      2007: {
+        year: 2007,
+        ceremonyNotes: '80th Academy Awards Personal Retrospective Ballot',
+        categories: {
+          'best-picture': {
+            categoryId: 'best-picture',
+            winnerNomineeId: 'nom-2007-pic-1',
+            nominees: [
+              {
+                id: 'nom-2007-pic-1',
+                filmId: makeFilmId('There Will Be Blood', 2007),
+                recipientName: 'Paul Thomas Anderson, Daniel Lupi & JoAnne Sellar',
+              },
+              {
+                id: 'nom-2007-pic-2',
+                filmId: makeFilmId('No Country for Old Men', 2007),
+                recipientName: 'Scott Rudin, Ethan Coen & Joel Coen',
+              },
+              {
+                id: 'nom-2007-pic-3',
+                filmId: makeFilmId('Zodiac', 2007),
+                recipientName: 'Ceán Chaffin, Brad Fischer & Mike Medavoy',
+              },
+            ],
+          },
+          'best-director': {
+            categoryId: 'best-director',
+            winnerNomineeId: 'nom-2007-dir-2',
+            nominees: [
+              {
+                id: 'nom-2007-dir-1',
+                filmId: makeFilmId('There Will Be Blood', 2007),
+                recipientName: 'Paul Thomas Anderson',
+              },
+              {
+                id: 'nom-2007-dir-2',
+                filmId: makeFilmId('No Country for Old Men', 2007),
+                recipientName: 'Joel Coen & Ethan Coen',
+              },
+              {
+                id: 'nom-2007-dir-3',
+                filmId: makeFilmId('Zodiac', 2007),
+                recipientName: 'David Fincher',
+              },
+            ],
+          },
+        },
+      },
+      2016: {
+        year: 2016,
+        ceremonyNotes: '89th Academy Awards Personal Ballot',
+        categories: {
+          'best-picture': {
+            categoryId: 'best-picture',
+            winnerNomineeId: 'nom-2016-pic-1',
+            nominees: [
+              {
+                id: 'nom-2016-pic-1',
+                filmId: makeFilmId('Moonlight', 2016),
+                recipientName: 'Adele Romanski, Dede Gardner & Jeremy Kleiner',
+              },
+              {
+                id: 'nom-2016-pic-2',
+                filmId: makeFilmId('The Handmaiden', 2016),
+                recipientName: 'Park Chan-wook & Syd Lim',
+              },
+              {
+                id: 'nom-2016-pic-3',
+                filmId: makeFilmId('Arrival', 2016),
+                recipientName: 'Shawn Levy, Dan Levine, Aaron Ryder & David Linde',
+              },
+              {
+                id: 'nom-2016-pic-4',
+                filmId: makeFilmId('La La Land', 2016),
+                recipientName: 'Fred Berger, Jordan Horowitz & Marc Platt',
+              },
+            ],
+          },
+        },
+      },
+      2019: {
+        year: 2019,
+        ceremonyNotes: '92nd Academy Awards Personal Ballot',
+        categories: {
+          'best-picture': {
+            categoryId: 'best-picture',
+            winnerNomineeId: 'nom-2019-pic-1',
+            nominees: [
+              {
+                id: 'nom-2019-pic-1',
+                filmId: makeFilmId('Parasite', 2019),
+                recipientName: 'Kwak Sin-ae & Bong Joon-ho',
+              },
+              {
+                id: 'nom-2019-pic-2',
+                filmId: makeFilmId('Portrait of a Lady on Fire', 2019),
+                recipientName: 'Bénédicte Couvreur, Producer',
+              },
+              {
+                id: 'nom-2019-pic-3',
+                filmId: makeFilmId('The Irishman', 2019),
+                recipientName: 'Martin Scorsese, Robert De Niro & Emma Tillinger Koskoff',
+              },
+              {
+                id: 'nom-2019-pic-4',
+                filmId: makeFilmId('Uncut Gems', 2019),
+                recipientName: 'Sebastian Bear-McClard, Eli Bush & Scott Rudin',
+              },
+              {
+                id: 'nom-2019-pic-5',
+                filmId: makeFilmId('The Lighthouse', 2019),
+                recipientName: 'Rodrigo Teixeira, Jay Van Hoy & Robert Eggers',
+              },
+            ],
+          },
+          'best-director': {
+            categoryId: 'best-director',
+            winnerNomineeId: 'nom-2019-dir-1',
+            nominees: [
+              {
+                id: 'nom-2019-dir-1',
+                filmId: makeFilmId('Parasite', 2019),
+                recipientName: 'Bong Joon-ho',
+              },
+              {
+                id: 'nom-2019-dir-2',
+                filmId: makeFilmId('Portrait of a Lady on Fire', 2019),
+                recipientName: 'Céline Sciamma',
+              },
+              {
+                id: 'nom-2019-dir-3',
+                filmId: makeFilmId('The Irishman', 2019),
+                recipientName: 'Martin Scorsese',
+              },
+            ],
+          },
+        },
+      },
+      2024: {
+        year: 2024,
+        ceremonyNotes: '97th Academy Awards Personal Ballot',
+        categories: {
+          'best-picture': {
+            categoryId: 'best-picture',
+            winnerNomineeId: 'nom-2024-pic-1',
+            nominees: [
+              {
+                id: 'nom-2024-pic-1',
+                filmId: makeFilmId('Anora', 2024),
+                recipientName: 'Alex Coco, Samantha Quan & Sean Baker',
+              },
+              {
+                id: 'nom-2024-pic-2',
+                filmId: makeFilmId('The Brutalist', 2024),
+                recipientName: 'Brady Corbet, D.J. Gugenheim & Trevor Matthews',
+              },
+              {
+                id: 'nom-2024-pic-3',
+                filmId: makeFilmId('Dune: Part Two', 2024),
+                recipientName: 'Mary Parent, Cale Boyter & Denis Villeneuve',
+              },
+              {
+                id: 'nom-2024-pic-4',
+                filmId: makeFilmId('Challengers', 2024),
+                recipientName: 'Amy Pascal, Luca Guadagnino & Zendaya',
+              },
+              {
+                id: 'nom-2024-pic-5',
+                filmId: makeFilmId('Conclave', 2024),
+                recipientName: 'Tessa Ross, Juliette Howell & Michael A. Jackman',
+              },
+            ],
+          },
+          'best-director': {
+            categoryId: 'best-director',
+            winnerNomineeId: 'nom-2024-dir-2',
+            nominees: [
+              {
+                id: 'nom-2024-dir-1',
+                filmId: makeFilmId('Anora', 2024),
+                recipientName: 'Sean Baker',
+              },
+              {
+                id: 'nom-2024-dir-2',
+                filmId: makeFilmId('The Brutalist', 2024),
+                recipientName: 'Brady Corbet',
+              },
+              {
+                id: 'nom-2024-dir-3',
+                filmId: makeFilmId('Dune: Part Two', 2024),
+                recipientName: 'Denis Villeneuve',
               },
             ],
           },

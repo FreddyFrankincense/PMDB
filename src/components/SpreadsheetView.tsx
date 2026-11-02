@@ -54,6 +54,10 @@ interface SpreadsheetViewProps {
   initialInspectedFilmId?: string | null;
   onClearInitialInspectedFilm?: () => void;
   onOpenFilmCreditsModal?: (film: FilmEntry) => void;
+  yearRankByTitleYear?: Map<string, number>;
+  personalOscarByTitleYear?: Map<string, { nominations: string[]; wins: string[] }>;
+  onNavigateToYearRanking?: (year: number) => void;
+  onNavigateToYearBallot?: (year: number) => void;
 }
 
 type SortField =
@@ -279,6 +283,10 @@ export const SpreadsheetView: React.FC<SpreadsheetViewProps> = ({
   initialInspectedFilmId,
   onClearInitialInspectedFilm,
   onOpenFilmCreditsModal,
+  yearRankByTitleYear,
+  personalOscarByTitleYear,
+  onNavigateToYearRanking,
+  onNavigateToYearBallot,
 }) => {
   // Primary Watchlist vs. Logged filter state
   const [watchStatusFilter, setWatchStatusFilter] = useState<WatchStatusFilter>('all');
@@ -1096,6 +1104,31 @@ export const SpreadsheetView: React.FC<SpreadsheetViewProps> = ({
                   >
                     {film.title}
                   </button>
+                  {(() => {
+                    const key = `${film.title.trim().toLowerCase()}::${film.year}`;
+                    const yrRank = yearRankByTitleYear?.get(key);
+                    const oscarStat = personalOscarByTitleYear?.get(key);
+                    return (
+                      <>
+                        {yrRank && (
+                          <span
+                            title={`Ranked #${yrRank} in your ${film.year} Annual Ranking`}
+                            className="px-1.5 py-0.5 text-[10px] font-mono tabular-nums rounded bg-slate-800 border border-slate-700 text-amber-300 shrink-0"
+                          >
+                            #{yrRank} in {film.year}
+                          </span>
+                        )}
+                        {oscarStat && oscarStat.nominations.length > 0 && (
+                          <span
+                            title={`Personal Oscars (${film.year}): ${oscarStat.wins.length} Wins, ${oscarStat.nominations.length} Nominations`}
+                            className="px-1.5 py-0.5 text-[10px] font-mono tabular-nums rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 shrink-0"
+                          >
+                            ★ {oscarStat.wins.length}W/{oscarStat.nominations.length}N
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
                   {devRecord && (
                     <button
                       type="button"
@@ -2647,20 +2680,60 @@ export const SpreadsheetView: React.FC<SpreadsheetViewProps> = ({
             <div className="fixed inset-y-0 right-0 z-40 w-full max-w-md bg-slate-900 border-l border-slate-800 shadow-2xl p-6 overflow-y-auto flex flex-col justify-between">
               <div className="space-y-5">
                 <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-800">
-                  <div>
-                    <div className="text-xs font-mono tabular-nums text-amber-400 mb-1">
-                      {inspectedFilm.watchlist
-                        ? 'Letterboxd Watchlist (Want to Watch)'
-                        : `Rank #${inspectedFilm.customRank ?? '—'} · Tier ${
-                            inspectedFilm.tier
-                          }`}
-                    </div>
-                    <h3 className="text-lg font-display font-bold text-slate-100">
-                      {inspectedFilm.title} ({inspectedFilm.year})
-                    </h3>
-                    <div className="text-xs text-slate-400 mt-0.5">
-                      Directed by {inspectedFilm.director} ·{' '}
-                      {inspectedFilm.runtimeMinutes}m · {inspectedFilm.country}
+                  <div className="flex items-start gap-3">
+                    {inspectedFilm.posterUrl && (
+                      <img
+                        src={inspectedFilm.posterUrl}
+                        alt={inspectedFilm.title}
+                        className="w-14 h-20 object-cover rounded border border-slate-700 shrink-0"
+                      />
+                    )}
+                    <div>
+                      <div className="text-xs font-mono tabular-nums text-amber-400 mb-1">
+                        {inspectedFilm.watchlist
+                          ? 'Letterboxd Watchlist (Want to Watch)'
+                          : `Rank #${inspectedFilm.customRank ?? '—'} · Tier ${
+                              inspectedFilm.tier
+                            }`}
+                      </div>
+                      <h3 className="text-lg font-display font-bold text-slate-100">
+                        {inspectedFilm.title} ({inspectedFilm.year})
+                      </h3>
+                      <div className="text-xs text-slate-400 mt-0.5">
+                        Directed by {inspectedFilm.director} ·{' '}
+                        {inspectedFilm.runtimeMinutes}m · {inspectedFilm.country}
+                      </div>
+                      {(() => {
+                        const key = `${inspectedFilm.title.trim().toLowerCase()}::${inspectedFilm.year}`;
+                        const yrRank = yearRankByTitleYear?.get(key);
+                        const oscarStat = personalOscarByTitleYear?.get(key);
+                        return (
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] font-mono tabular-nums">
+                            {onNavigateToYearRanking && (
+                              <button
+                                type="button"
+                                onClick={() => onNavigateToYearRanking(inspectedFilm.year)}
+                                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 transition-colors cursor-pointer"
+                              >
+                                {yrRank
+                                  ? `Ranked #${yrRank} in ${inspectedFilm.year} →`
+                                  : `Rank in ${inspectedFilm.year} →`}
+                              </button>
+                            )}
+                            {onNavigateToYearBallot && (
+                              <button
+                                type="button"
+                                onClick={() => onNavigateToYearBallot(inspectedFilm.year)}
+                                className="px-2 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 transition-colors cursor-pointer"
+                              >
+                                {oscarStat && oscarStat.nominations.length > 0
+                                  ? `Personal Oscars: ${oscarStat.wins.length}W / ${oscarStat.nominations.length}N →`
+                                  : `${inspectedFilm.year} Oscar Ballot →`}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                   <button

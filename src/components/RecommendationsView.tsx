@@ -24,6 +24,7 @@ interface RecommendationsViewProps {
   profile: ProfileAccount;
   onUpdateFilms: (films: FilmEntry[]) => void;
   onUpdateDismissedRecommendations: (dismissedSlugs: string[]) => void;
+  onInspectFilm?: (title: string, year: number, director?: string) => void;
 }
 
 type WatchlistFilterMode = 'all' | 'not_on_watchlist' | 'on_watchlist';
@@ -42,6 +43,7 @@ export const RecommendationsView: React.FC<RecommendationsViewProps> = ({
   profile,
   onUpdateFilms,
   onUpdateDismissedRecommendations,
+  onInspectFilm,
 }) => {
   const [selectedPathway, setSelectedPathway] =
     useState<RecommendationPathway>('all');
@@ -677,9 +679,20 @@ export const RecommendationsView: React.FC<RecommendationsViewProps> = ({
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <h3 className="text-base font-display font-bold text-slate-100 truncate">
-                          {item.title}
-                        </h3>
+                        {onInspectFilm ? (
+                          <button
+                            type="button"
+                            onClick={() => onInspectFilm(item.title, item.year, item.director)}
+                            className="text-base font-display font-bold text-slate-100 hover:text-amber-300 truncate text-left transition-colors cursor-pointer"
+                            title="Inspect in PMDB Film Dossier"
+                          >
+                            {item.title}
+                          </button>
+                        ) : (
+                          <h3 className="text-base font-display font-bold text-slate-100 truncate">
+                            {item.title}
+                          </h3>
+                        )}
                         <a
                           href={item.letterboxdUri}
                           target="_blank"
