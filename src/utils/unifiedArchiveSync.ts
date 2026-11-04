@@ -95,23 +95,36 @@ export function filmEntryToFilmRecord(
     ? ['letterboxd-watchlist', ...baseTags]
     : baseTags;
 
+  const isPlaceholderNote =
+    !entry.notes ||
+    entry.notes === 'Logged via external profile view.' ||
+    entry.notes === 'Scraped from public Letterboxd profile.' ||
+    entry.notes === 'Imported in Standalone Desktop Mode.';
+
+  const resolvedReview = !isPlaceholderNote
+    ? entry.notes
+    : existing?.review;
+
   return {
     id,
     title: entry.title,
     year: entry.year,
     letterboxdUri: entry.letterboxdUri || existing?.letterboxdUri,
-    rating: entry.rating !== null ? entry.rating : undefined,
-    liked: entry.liked,
-    rewatch: entry.rewatch,
+    rating: entry.rating !== null ? entry.rating : existing?.rating,
+    liked: entry.liked ?? existing?.liked,
+    rewatch: entry.rewatch ?? existing?.rewatch,
     watchedDate: entry.watchlist ? undefined : entry.watchedDate || existing?.watchedDate,
     ratedDate: entry.loggedDate || existing?.ratedDate,
-    review: entry.notes !== undefined ? entry.notes : existing?.review,
+    review: resolvedReview,
     tags: syncedTags,
     listIds: existing?.listIds || [],
     metadata: {
       ...(existing?.metadata || {}),
       posterUrl: entry.posterUrl || existing?.metadata?.posterUrl,
-      director: entry.director || existing?.metadata?.director,
+      director:
+        entry.director && entry.director !== 'Archive Filmmaker'
+          ? entry.director
+          : existing?.metadata?.director || entry.director,
       genres:
         entry.genres && entry.genres.length > 0
           ? entry.genres
@@ -249,11 +262,13 @@ export function syncProfileFilmsIntoArchive(
     const existingId = archiveKeyToId.get(key) || makeFilmId(entry.title, entry.year);
     const existingRecord = nextFilms[existingId];
 
-    // Sync if it already exists in archive, OR is a canonical film, OR is a user-added/imported film
+    // Sync if it already exists in archive, OR is a canonical film, OR is a user-added/imported/scraped film
     const shouldIncludeInCatalog =
       Boolean(existingRecord) ||
       !isSyntheticHighVolumeTitle(entry.title) ||
       entry.tags.includes('manual-entry') ||
+      entry.tags.includes('rss-sync') ||
+      entry.tags.includes('html-scrape') ||
       entry.tags.includes('framesheet-recommended');
 
     if (shouldIncludeInCatalog) {

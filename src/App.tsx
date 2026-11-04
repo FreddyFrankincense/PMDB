@@ -61,6 +61,7 @@ import { DataSourcesView } from './components/DataSourcesView';
 import { ChangesSummaryView } from './components/ChangesSummaryView';
 import { FilmGroupCohort } from './components/GroupHistogramPanel';
 import { DesktopExecutableModal } from './components/DesktopExecutableModal';
+import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { usePWAInstall, useOnlineStatus } from './hooks/usePWAInstall';
 
 export type UnifiedNavTab =
@@ -245,10 +246,46 @@ export default function App() {
     'rating-desc'
   );
 
-  // Modals
+  // Modals & Cross-Module Global Search Navigation State
   const [selectedFilmIdForModal, setSelectedFilmIdForModal] = useState<string | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showDesktopExecutableModal, setShowDesktopExecutableModal] = useState(false);
+  const [showGlobalSearchModal, setShowGlobalSearchModal] = useState(false);
+  const [listsTargetListId, setListsTargetListId] = useState<string | null>(null);
+  const [listsTargetSubTab, setListsTargetSubTab] = useState<'lists' | 'reviews' | null>(null);
+  const [listsTargetReviewQuery, setListsTargetReviewQuery] = useState<string>('');
+
+  // Global Keyboard Shortcut: Cmd/Ctrl + K (or '/' when not typing in an input)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setShowGlobalSearchModal((prev) => !prev);
+        return;
+      }
+      if (
+        e.key === '/' &&
+        !showGlobalSearchModal &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName?.toLowerCase();
+        if (
+          tag !== 'input' &&
+          tag !== 'textarea' &&
+          tag !== 'select' &&
+          !target?.isContentEditable
+        ) {
+          e.preventDefault();
+          setShowGlobalSearchModal(true);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [showGlobalSearchModal]);
 
   // PWA & Standalone Desktop Status
   const { isInstallable, isInstalled, install: triggerPwaInstall } = usePWAInstall();
@@ -523,13 +560,34 @@ export default function App() {
 
         if (q) {
           const matchTitle = film.title.toLowerCase().includes(q);
-          const matchDir = film.metadata?.director?.toLowerCase().includes(q);
+          const matchDir =
+            film.metadata?.director?.toLowerCase().includes(q) ||
+            pfEntry?.director?.toLowerCase().includes(q);
           const matchCast = film.metadata?.cast?.some((c) => c.toLowerCase().includes(q));
+          const matchWriters = film.metadata?.writers?.some((w) => w.toLowerCase().includes(q));
+          const matchCrew =
+            film.metadata?.cinematographer?.toLowerCase().includes(q) ||
+            film.metadata?.composer?.toLowerCase().includes(q) ||
+            film.metadata?.editor?.toLowerCase().includes(q);
           const matchGenre = (pfEntry?.genres || film.metadata?.genres || []).some((g) =>
             g.toLowerCase().includes(q)
           );
+          const matchTags = (pfEntry?.tags || film.tags || []).some((t) =>
+            t.toLowerCase().includes(q)
+          );
           const matchYear = String(film.year).includes(q);
-          if (!matchTitle && !matchDir && !matchCast && !matchGenre && !matchYear) return false;
+          if (
+            !matchTitle &&
+            !matchDir &&
+            !matchCast &&
+            !matchWriters &&
+            !matchCrew &&
+            !matchGenre &&
+            !matchTags &&
+            !matchYear
+          ) {
+            return false;
+          }
         }
 
         if (decadeFilter !== 'all') {
@@ -718,7 +776,7 @@ export default function App() {
       if (setAsActive) {
         setActiveProfileId(newProfile.id);
         setArchive((prev) => syncProfileFilmsIntoArchive(newProfile.films, prev));
-        setActiveTab('spreadsheet');
+        setActiveTab((prevTab) => (prevTab === 'sources' ? 'spreadsheet' : prevTab));
       }
     },
     [archive]
@@ -866,15 +924,27 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Zone 3: 1 Primary Action Button */}
-        <div className="flex items-center shrink-0">
+        {/* Zone 3: Global Search Trigger + Primary Action Button */}
+        <div className="flex items-center gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowGlobalSearchModal(true)}
+            title="Global PMDB Search (Cmd/Ctrl + K)"
+            className="inline-flex items-center gap-2 px-3 py-2 text-xs font-medium border border-[#DED9CE] dark:border-[#262830] bg-[#F2EFE9] dark:bg-[#141519] text-[#181615] dark:text-[#F4F1EA] hover:border-[#9A7B1C] dark:hover:border-[#D4AF37] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Search className="w-3.5 h-3.5 text-[#9A7B1C] dark:text-[#D4AF37]" />
+            <span>Global Search</span>
+            <kbd className="px-1.5 py-0.5 text-[10px] font-mono-tabular bg-[#FBF9F5] dark:bg-[#0C0C0E] border border-[#DED9CE] dark:border-[#262830] text-[#6E6A63] dark:text-[#9A9891]">
+              ⌘K
+            </kbd>
+          </button>
           <button
             type="button"
             onClick={() => setShowImportModal(true)}
             className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-[#9A7B1C] dark:bg-[#D4AF37] text-white dark:text-[#0C0C0E] hover:opacity-90 transition-opacity cursor-pointer whitespace-nowrap shrink-0"
           >
             <Upload className="w-3.5 h-3.5" />
-            <span>Import CSV & Backup</span>
+            <span>Sync Letterboxd & CSV</span>
           </button>
         </div>
       </header>
@@ -1855,6 +1925,9 @@ export default function App() {
             baselineFilms={activeProfile.baselineFilms}
             yearRankByTitleYear={yearRankByTitleYear}
             personalOscarByTitleYear={personalOscarByTitleYear}
+            externalSelectedListId={listsTargetListId}
+            externalSubTab={listsTargetSubTab}
+            externalReviewQuery={listsTargetReviewQuery}
             onOpenCohortInAnalytics={(cohort) => {
               setAnalyticsTargetCohort(cohort);
               setActiveTab('analytics');
@@ -2050,6 +2123,7 @@ export default function App() {
           onUpdateArchive={(nextArchive) => {
             updateUnifiedArchive(nextArchive);
           }}
+          onAddOrUpdateProfile={handleAddOrUpdateProfile}
           onTriggerBatchEnrich={triggerBatchEnrich}
           onResetToSeedArchive={() => {
             const seed = createInitialSeedArchive();
@@ -2066,6 +2140,67 @@ export default function App() {
           onClose={() => setShowDesktopExecutableModal(false)}
         />
       )}
+
+      {/* Global Search Command Palette (Cmd/Ctrl + K) */}
+      <GlobalSearchModal
+        isOpen={showGlobalSearchModal}
+        onClose={() => setShowGlobalSearchModal(false)}
+        archive={archive}
+        activeProfile={activeProfile}
+        oscarStatsByFilmId={oscarStatsByFilmId}
+        personalOscarByTitleYear={personalOscarByTitleYear}
+        yearRankByFilmId={yearRankByFilmId}
+        yearRankByTitleYear={yearRankByTitleYear}
+        onSelectFilmModal={(filmId) => setSelectedFilmIdForModal(filmId)}
+        onOpenInSpreadsheet={(filmId) => {
+          setSpreadsheetInspectedFilmId(filmId);
+          setActiveTab('spreadsheet');
+        }}
+        onFilterCatalogByQuery={(q) => {
+          setSearchQuery(q);
+          setDecadeFilter('all');
+          setMinRatingFilter(0);
+          setOscarFilter('all');
+          setTierFilter('all');
+          setStatusFilter('all');
+          setListFilter('all');
+          setActiveTab('catalog');
+        }}
+        onFilterCatalogByList={(listId) => {
+          setSearchQuery('');
+          setDecadeFilter('all');
+          setMinRatingFilter(0);
+          setOscarFilter('all');
+          setTierFilter('all');
+          setStatusFilter('all');
+          setListFilter(listId);
+          setActiveTab('catalog');
+        }}
+        onOpenListInView={(listId) => {
+          setListsTargetListId(listId);
+          setListsTargetSubTab('lists');
+          setActiveTab('lists');
+        }}
+        onOpenReviewSearchInView={(revQuery) => {
+          setListsTargetReviewQuery(revQuery);
+          setListsTargetSubTab('reviews');
+          setActiveTab('lists');
+        }}
+        onNavigateToYearRanking={(year) => {
+          setSelectedYear(year);
+          setActiveTab('rankings');
+        }}
+        onNavigateToYearBallot={(year) => {
+          setSelectedYear(year);
+          setActiveTab('ballots');
+        }}
+        onOpenCohortInAnalytics={(cohort) => {
+          setAnalyticsTargetCohort(cohort);
+          setActiveTab('analytics');
+        }}
+        onNavigateTab={(tab) => setActiveTab(tab)}
+        onQuickAddFromImdb={handleQuickAddFilmFromImdb}
+      />
 
       {/* Offline Connectivity Banner */}
       {!isOnline && (

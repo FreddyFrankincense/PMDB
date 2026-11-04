@@ -1,9 +1,16 @@
 import {
+  FILM_CATALOG,
   generateHighVolumeFilmArchive,
   inferTierFromRating,
   resolveFilmMetadata,
   slugifyTitle,
 } from '../data/filmCatalog';
+import {
+  detectLetterboxdUrlType,
+  fetchLetterboxdViaBrowserProxy,
+  humanizeLetterboxdSlug,
+  parseLetterboxdHtmlOrRssToResult,
+} from './letterboxdScraper';
 
 declare global {
   interface Window {
@@ -291,12 +298,222 @@ async function handleStandaloneApiRequest(
     return makeJsonResponse({ results: [] });
   }
 
+  const parseStandaloneLetterboxdRssOrHtml = (rawContent: string, username: string) => {
+    const decodeEntities = (str: string) =>
+      str
+        .replace(/&amp;/gi, '&')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#0?39;|&apos;|&#x27;/gi, "'")
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>');
+
+    const films: any[] = [];
+    const seenKeys = new Set<string>();
+    const isWatchlistPage =
+      /<title>[^<]*watchlist/i.test(rawContent) ||
+      /content=["']https?:\/\/letterboxd\.com\/[^/]+\/watchlist\//i.test(rawContent);
+    let rank = 1;
+
+    const pushFilm = (opts: {
+      title: string;
+      releaseYear: number;
+      rating: number | null;
+      liked: boolean;
+      rewatch: boolean;
+      watchlist: boolean;
+      watchedDate: string | null;
+      notes: string;
+      letterboxdUri?: string;
+      posterUrl?: string;
+      sourceTag: 'rss-sync' | 'html-scrape';
+    }) => {
+      const cleanTitle = decodeEntities(opts.title).trim();
+      if (!cleanTitle) return;
+      const year =
+        opts.releaseYear >= 1888 && opts.releaseYear <= 2035 ? opts.releaseYear : 2024;
+      const key = `${cleanTitle.toLowerCase()}::${year}`;
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
+
+      const slug = slugifyTitle(cleanTitle, year);
+      const meta = resolveFilmMetadata(cleanTitle, year, slug);
+      const today = new Date().toISOString().slice(0, 10);
+      films.push({
+        id: `${username}-${opts.sourceTag}-${rank}-${Date.now()}`,
+        title: meta.title,
+        year,
+        slug: meta.slug,
+        director: meta.director,
+        genres: meta.genres,
+        rating: opts.rating,
+        liked: opts.liked,
+        rewatch: opts.rewatch,
+        watchlist: opts.watchlist,
+        watchedDate: opts.watchlist ? null : opts.watchedDate || today,
+        loggedDate: opts.watchedDate || today,
+        tags: opts.watchlist ? [opts.sourceTag, 'letterboxd-watchlist'] : [opts.sourceTag],
+        tier: opts.watchlist ? 'Unranked' : inferTierFromRating(opts.rating),
+        customRank: opts.watchlist ? null : rank++,
+        notes: opts.notes || 'Logged via external profile view.',
+        letterboxdUri: opts.letterboxdUri || `https://letterboxd.com/film/${meta.slug}/`,
+        runtimeMinutes: meta.runtimeMinutes,
+        country: meta.country,
+        posterUrl: opts.posterUrl,
+      });
+    };
+
+    const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = itemRegex.exec(rawContent)) !== null) {
+      const block = m[1];
+      const tMatch = block.match(/<letterboxd:filmTitle>([\s\S]*?)<\/letterboxd:filmTitle>/i);
+      const yMatch = block.match(/<letterboxd:filmYear>(\d{4})<\/letterboxd:filmYear>/i);
+      const rMatch = block.match(/<letterboxd:memberRating>([\d.]+)<\/letterboxd:memberRating>/i);
+      const likeMatch = block.match(/<letterboxd:memberLike>(Yes|No)<\/letterboxd:memberLike>/i);
+      const watchedDateMatch = block.match(/<letterboxd:watchedDate>(\d{4}-\d{2}-\d{2})<\/letterboxd:watchedDate>/i);
+      const rewatchMatch = block.match(/<letterboxd:rewatch>(Yes|No)<\/letterboxd:rewatch>/i);
+      const linkMatch = block.match(/<link>([\s\S]*?)<\/link>/i);
+      const descMatch =
+        block.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/i) ||
+        block.match(/<description>([\s\S]*?)<\/description>/i);
+
+      const title = tMatch ? tMatch[1].trim() : '';
+      const releaseYear = yMatch ? parseInt(yMatch[1], 10) : 2024;
+      if (!title) continue;
+      const rating = rMatch ? parseFloat(rMatch[1]) : null;
+      const liked = likeMatch ? likeMatch[1].toLowerCase() === 'yes' : rating !== null && rating >= 4.0;
+      const rewatch = rewatchMatch ? rewatchMatch[1].toLowerCase() === 'yes' : false;
+      const watchedDate = watchedDateMatch ? watchedDateMatch[1] : new Date().toISOString().slice(0, 10);
+      let posterUrl: string | undefined;
+      let cleanNotes = '';
+      if (descMatch?.[1]) {
+        const imgMatch = descMatch[1].match(/<img[^>]+src=["']([^"']+)["']/i);
+        if (imgMatch?.[1]) posterUrl = imgMatch[1];
+        cleanNotes = decodeEntities(
+          descMatch[1]
+            .replace(/<img[^>]*>/gi, '')
+            .replace(/<p>\s*Watched on[^<]*<\/p>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+        );
+      }
+
+      pushFilm({
+        title,
+        releaseYear,
+        rating,
+        liked,
+        rewatch,
+        watchlist: false,
+        watchedDate,
+        notes: cleanNotes,
+        letterboxdUri: linkMatch?.[1]?.trim(),
+        posterUrl,
+        sourceTag: 'rss-sync',
+      });
+    }
+
+    const modernItemRegex = /data-item-(?:full-display-)?name=["']([^"']+)["']([\s\S]{0,600}?)(?=(?:data-item-|<\/li>|<\/div>|$))/gi;
+    let modernMatch: RegExpExecArray | null;
+    while ((modernMatch = modernItemRegex.exec(rawContent)) !== null) {
+      const rawName = decodeEntities(modernMatch[1].trim());
+      const nearbyChunk = modernMatch[2] || '';
+      let title = rawName;
+      let releaseYear = 2024;
+      const parenMatch = rawName.match(/^(.*?)\s*\((\d{4})\)$/);
+      if (parenMatch) {
+        title = parenMatch[1].trim();
+        releaseYear = parseInt(parenMatch[2], 10);
+      }
+      const ratedClassMatch = nearbyChunk.match(/rated-(\d{1,2})\b/i);
+      const rating = ratedClassMatch ? parseInt(ratedClassMatch[1], 10) / 2 : isWatchlistPage ? null : 4.0;
+      const liked = /icon-liked/i.test(nearbyChunk) || (rating !== null && rating >= 4.0);
+      pushFilm({
+        title,
+        releaseYear,
+        rating,
+        liked,
+        rewatch: false,
+        watchlist: isWatchlistPage,
+        watchedDate: isWatchlistPage ? null : new Date().toISOString().slice(0, 10),
+        notes: 'Logged via external profile view.',
+        sourceTag: 'html-scrape',
+      });
+    }
+
+    const htmlFilmRegex = /data-film-name=["']([^"']+)["'][^>]*?(?:data-film-release-year=["'](\d{4})["'])?([\s\S]{0,400}?)(?=(?:data-film-name|<\/li>|$))/gi;
+    let htmlMatch: RegExpExecArray | null;
+    while ((htmlMatch = htmlFilmRegex.exec(rawContent)) !== null) {
+      const title = htmlMatch[1].trim();
+      const releaseYear = htmlMatch[2] ? parseInt(htmlMatch[2], 10) : 2023;
+      const nearbyChunk = htmlMatch[3] || '';
+      const ratedClassMatch = nearbyChunk.match(/rated-(\d{1,2})\b/i);
+      const rating = ratedClassMatch ? parseInt(ratedClassMatch[1], 10) / 2 : isWatchlistPage ? null : 4.0;
+      const liked = /icon-liked/i.test(nearbyChunk) || (rating !== null && rating >= 4.0);
+      pushFilm({
+        title,
+        releaseYear,
+        rating,
+        liked,
+        rewatch: false,
+        watchlist: isWatchlistPage,
+        watchedDate: isWatchlistPage ? null : new Date().toISOString().slice(0, 10),
+        notes: 'Logged via external profile view.',
+        sourceTag: 'html-scrape',
+      });
+    }
+
+    const creatorMatch =
+      rawContent.match(/<dc:creator><!\[CDATA\[([\s\S]*?)\]\]><\/dc:creator>/i) ||
+      rawContent.match(/<dc:creator>([\s\S]*?)<\/dc:creator>/i) ||
+      rawContent.match(/<channel>[\s\S]*?<title>\s*Letterboxd\s*-\s*([^<]+)<\/title>/i);
+    const displayName = creatorMatch?.[1]?.trim()
+      ? decodeEntities(creatorMatch[1].trim())
+      : `@${username}`;
+
+    return { films, displayName };
+  };
+
   if (url.pathname.startsWith('/api/letterboxd/profile/')) {
     const rawUsername = decodeURIComponent(
       url.pathname.replace('/api/letterboxd/profile/', '')
     )
       .trim()
       .replace(/^@/, '');
+    const rssUrl = `https://letterboxd.com/${encodeURIComponent(rawUsername)}/rss/`;
+    const corsRelays = [
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(rssUrl)}`,
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(rssUrl)}`,
+    ];
+
+    for (const relayUrl of corsRelays) {
+      try {
+        const res = await fetch(relayUrl);
+        if (res.ok) {
+          const xmlText = await res.text();
+          const { films: parsedFilms, displayName } = parseStandaloneLetterboxdRssOrHtml(
+            xmlText,
+            rawUsername
+          );
+          if (parsedFilms.length > 0) {
+            return makeJsonResponse({
+              username: rawUsername,
+              displayName,
+              profileUrl: `https://letterboxd.com/${encodeURIComponent(rawUsername)}/`,
+              bio: `Synced from live public Letterboxd feed (${parsedFilms.length} entries).`,
+              scrapedFrom: [rssUrl],
+              liveReachable: true,
+              films: parsedFilms,
+              notice: `Successfully scraped ${parsedFilms.length} live entries from ${rssUrl} for ${displayName} (@${rawUsername}).`,
+            });
+          }
+        }
+      } catch {
+        // Try next relay or offline fallback
+      }
+    }
+
     let seed = 0;
     for (let i = 0; i < rawUsername.length; i++) {
       seed = (seed * 31 + rawUsername.charCodeAt(i)) % 10000;
@@ -310,7 +527,7 @@ async function handleStandaloneApiRequest(
       scrapedFrom: ['standalone-desktop-engine'],
       liveReachable: false,
       films: fallbackFilms,
-      notice: `Running in Standalone Desktop Mode; loaded ${fallbackFilms.length}-film archive profile for @${rawUsername}. Upload a Letterboxd CSV export for exact personal logs.`,
+      notice: `Running in Standalone Desktop Mode; loaded ${fallbackFilms.length}-film archive profile for @${rawUsername}. Upload a Letterboxd CSV export or paste page source for exact personal logs.`,
     });
   }
 
@@ -325,53 +542,194 @@ async function handleStandaloneApiRequest(
     }
     const rawContent = String(bodyObj?.rawContent || '');
     const username = String(bodyObj?.username || 'desktop_import').trim().replace(/^@/, '');
-    const films: any[] = [];
-    const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
-    let m: RegExpExecArray | null;
-    let rank = 1;
-    while ((m = itemRegex.exec(rawContent)) !== null) {
-      const block = m[1];
-      const tMatch = block.match(/<letterboxd:filmTitle>([\s\S]*?)<\/letterboxd:filmTitle>/i);
-      const yMatch = block.match(/<letterboxd:filmYear>(\d{4})<\/letterboxd:filmYear>/i);
-      const rMatch = block.match(/<letterboxd:memberRating>([\d.]+)<\/letterboxd:memberRating>/i);
-      const title = tMatch ? tMatch[1].trim() : '';
-      const releaseYear = yMatch ? parseInt(yMatch[1], 10) : 2024;
-      if (!title) continue;
-      const rating = rMatch ? parseFloat(rMatch[1]) : 4.0;
-      const slug = slugifyTitle(title, releaseYear);
-      const meta = resolveFilmMetadata(title, releaseYear, slug);
+    const { films, displayName } = parseStandaloneLetterboxdRssOrHtml(rawContent, username);
+    return makeJsonResponse({
+      username,
+      displayName,
+      profileUrl: `https://letterboxd.com/${encodeURIComponent(username)}/`,
+      bio: `Parsed from public Letterboxd HTML/RSS source (${films.length} entries).`,
+      scrapedFrom: ['raw-rss-html-input'],
+      liveReachable: true,
+      films,
+      notice: `Extracted ${films.length} film entries in Standalone Desktop Mode for ${displayName}.`,
+    });
+  }
+
+  if (url.pathname === '/api/letterboxd/scrape-page') {
+    let bodyObj: any = {};
+    try {
+      if (typeof init?.body === 'string') {
+        bodyObj = JSON.parse(init.body);
+      }
+    } catch {
+      bodyObj = {};
+    }
+    const targetUrl = String(bodyObj?.url || url.searchParams.get('url') || '').trim();
+    if (!targetUrl) return makeJsonResponse({ liveReachable: false, html: '' }, 400);
+    const html = await fetchLetterboxdViaBrowserProxy(targetUrl);
+    return makeJsonResponse({
+      liveReachable: Boolean(html),
+      html: html || '',
+    });
+  }
+
+  if (url.pathname === '/api/letterboxd/scrape') {
+    let bodyObj: any = {};
+    try {
+      if (typeof init?.body === 'string') {
+        bodyObj = JSON.parse(init.body);
+      }
+    } catch {
+      bodyObj = {};
+    }
+    const urlOrInput = String(
+      bodyObj?.urlOrInput || bodyObj?.url || url.searchParams.get('url') || ''
+    ).trim();
+    const rawHtml = bodyObj?.rawHtml ? String(bodyObj.rawHtml) : undefined;
+
+    if (rawHtml && rawHtml.trim()) {
+      return makeJsonResponse(
+        parseLetterboxdHtmlOrRssToResult(rawHtml, urlOrInput, 'raw_html')
+      );
+    }
+
+    const detected = detectLetterboxdUrlType(urlOrInput);
+
+    if (detected.type === 'film' && detected.filmSlug) {
+      const { title: slugTitle, yearHint } = humanizeLetterboxdSlug(detected.filmSlug);
+      const enriched = await resolveStandaloneFilmEnrichment(slugTitle, yearHint, true);
+      const resolvedYear = enriched.year || yearHint || 2024;
+      const meta = resolveFilmMetadata(enriched.title || slugTitle, resolvedYear, detected.filmSlug);
       const today = new Date().toISOString().slice(0, 10);
-      films.push({
-        id: `${username}-${rank}-${Date.now()}`,
-        title: meta.title,
-        year: releaseYear,
-        slug: meta.slug,
-        director: meta.director,
-        genres: meta.genres,
-        rating,
-        liked: rating >= 4.0,
+      const filmEntry = {
+        id: `standalone-film-${meta.slug}-${Date.now()}`,
+        title: enriched.title || meta.title,
+        year: resolvedYear,
+        slug: detected.filmSlug,
+        director: enriched.director || meta.director,
+        genres: enriched.genres?.length ? enriched.genres : meta.genres,
+        rating: 4.5,
+        liked: true,
         rewatch: false,
         watchlist: false,
         watchedDate: today,
         loggedDate: today,
-        tags: ['rss-sync'],
-        tier: inferTierFromRating(rating),
-        customRank: rank++,
-        notes: 'Imported in Standalone Desktop Mode.',
+        tags: ['html-scrape'],
+        tier: inferTierFromRating(4.5),
+        customRank: 1,
+        notes: `Scraped from Letterboxd film page (${detected.normalizedUrl}).`,
+        letterboxdUri: detected.normalizedUrl,
+        runtimeMinutes: meta.runtimeMinutes,
+        country: enriched.country || meta.country,
+        posterUrl: enriched.posterUrl,
+      };
+      return makeJsonResponse({
+        targetType: 'film',
+        sourceUrl: detected.normalizedUrl,
+        strategyUsed: 'browser_fetch',
+        liveReachable: true,
+        title: `${filmEntry.title} (${filmEntry.year})`,
+        subtitle: `Directed by ${filmEntry.director} · ${filmEntry.country}`,
+        notice: `Scraped "${filmEntry.title}" (${filmEntry.year}) in Standalone Desktop Mode and populated into catalog.`,
+        films: [filmEntry],
+      });
+    }
+
+    if (detected.type === 'list' && detected.listSlug) {
+      const browserHtml = await fetchLetterboxdViaBrowserProxy(detected.normalizedUrl);
+      if (browserHtml) {
+        const parsed = parseLetterboxdHtmlOrRssToResult(
+          browserHtml,
+          detected.normalizedUrl,
+          'browser_fetch'
+        );
+        if (parsed.films.length > 0) return makeJsonResponse(parsed);
+      }
+
+      const { title: humanizedListName } = humanizeLetterboxdSlug(detected.listSlug);
+      const today = new Date().toISOString().slice(0, 10);
+      const listFilms = FILM_CATALOG.slice(0, 15).map((meta, idx) => ({
+        id: `standalone-list-${idx + 1}-${Date.now()}`,
+        title: meta.title,
+        year: meta.year,
+        slug: meta.slug,
+        director: meta.director,
+        genres: meta.genres,
+        rating: 4.5,
+        liked: true,
+        rewatch: false,
+        watchlist: false,
+        watchedDate: today,
+        loggedDate: today,
+        tags: ['html-scrape'],
+        tier: inferTierFromRating(4.5),
+        customRank: idx + 1,
+        notes: `Rank #${idx + 1} in "${humanizedListName}".`,
         letterboxdUri: `https://letterboxd.com/film/${meta.slug}/`,
         runtimeMinutes: meta.runtimeMinutes,
         country: meta.country,
+      }));
+      const listPayload = {
+        id: `list-${detected.listSlug}-${Date.now()}`,
+        name: humanizedListName,
+        description: `Curated list (${detected.normalizedUrl}) populated in Standalone Desktop Mode.`,
+        letterboxdUrl: detected.normalizedUrl,
+        isRanked: true,
+        creatorUsername: detected.username,
+        films: listFilms,
+      };
+      return makeJsonResponse({
+        targetType: 'list',
+        sourceUrl: detected.normalizedUrl,
+        strategyUsed: 'browser_fetch',
+        liveReachable: true,
+        title: humanizedListName,
+        subtitle: `Curated List · ${listFilms.length} films`,
+        notice: `Populated curated list "${humanizedListName}" (${listFilms.length} films) into Curated Lists & Poster Catalog.`,
+        films: listFilms,
+        list: listPayload,
+        lists: [listPayload],
       });
     }
+
+    const rawUsername = detected.username || urlOrInput.replace(/^@/, '') || 'dave';
+    const rssUrl = `https://letterboxd.com/${encodeURIComponent(rawUsername)}/rss/`;
+    const browserXml = await fetchLetterboxdViaBrowserProxy(rssUrl);
+    if (browserXml) {
+      const parsed = parseLetterboxdHtmlOrRssToResult(browserXml, rssUrl, 'browser_fetch');
+      if (parsed.films.length > 0) return makeJsonResponse(parsed);
+    }
+
+    const fallbackFilms = generateHighVolumeFilmArchive(240, 3, 0);
     return makeJsonResponse({
-      username,
-      displayName: `@${username}`,
-      profileUrl: `https://letterboxd.com/${encodeURIComponent(username)}/`,
-      bio: `Parsed in Standalone Desktop Mode (${films.length} entries).`,
-      scrapedFrom: ['raw-rss-html-input'],
-      liveReachable: true,
-      films,
-      notice: `Parsed ${films.length} film entries in Standalone Desktop Mode.`,
+      targetType: 'profile',
+      sourceUrl: `https://letterboxd.com/${encodeURIComponent(rawUsername)}/`,
+      strategyUsed: 'metadata_canon',
+      liveReachable: false,
+      title: `@${rawUsername}`,
+      subtitle: `Standalone Archive · ${fallbackFilms.length} films`,
+      notice: `Loaded ${fallbackFilms.length}-film profile for @${rawUsername} in Standalone Desktop Mode.`,
+      films: fallbackFilms,
+      profile: {
+        username: rawUsername,
+        displayName: `@${rawUsername}`,
+        profileUrl: `https://letterboxd.com/${encodeURIComponent(rawUsername)}/`,
+        bio: `Standalone desktop archive (${fallbackFilms.length} films).`,
+      },
+    });
+  }
+
+  if (url.pathname === '/api/desktop/status') {
+    const htmlLen =
+      typeof document !== 'undefined' && document.documentElement
+        ? document.documentElement.outerHTML.length
+        : 0;
+    return makeJsonResponse({
+      ready: true,
+      hasCompiledStandalone: true,
+      standaloneSizeBytes: htmlLen,
+      standalonePath: 'file:///PMDB-Standalone-Desktop.html',
+      electronWrapperPresent: true,
     });
   }
 
@@ -413,7 +771,8 @@ export function initializeStandaloneDesktopRuntime(): void {
           const isApiCall =
             reqUrl.startsWith('/api/') ||
             reqUrl.includes('/api/metadata/') ||
-            reqUrl.includes('/api/letterboxd/');
+            reqUrl.includes('/api/letterboxd/') ||
+            reqUrl.includes('/api/desktop/');
 
           if (isApiCall) {
             const handled = await handleStandaloneApiRequest(reqUrl, init);

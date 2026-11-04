@@ -25,11 +25,14 @@ function createMainWindow() {
     },
   });
 
-  const standaloneHtmlPath = path.join(__dirname, 'dist', 'PMDB-Standalone-Desktop.html');
+  const rootStandalonePath = path.join(__dirname, 'PMDB-Standalone-Desktop.html');
+  const distStandalonePath = path.join(__dirname, 'dist', 'PMDB-Standalone-Desktop.html');
   const distIndexPath = path.join(__dirname, 'dist', 'index.html');
 
-  if (fs.existsSync(standaloneHtmlPath)) {
-    win.loadFile(standaloneHtmlPath);
+  if (fs.existsSync(rootStandalonePath)) {
+    win.loadFile(rootStandalonePath);
+  } else if (fs.existsSync(distStandalonePath)) {
+    win.loadFile(distStandalonePath);
   } else if (fs.existsSync(distIndexPath)) {
     win.loadFile(distIndexPath);
   } else {

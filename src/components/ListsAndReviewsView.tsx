@@ -30,6 +30,9 @@ interface ListsAndReviewsViewProps {
   yearRankByTitleYear?: Map<string, number>;
   personalOscarByTitleYear?: Map<string, { nominations: string[]; wins: string[] }>;
   onOpenCohortInAnalytics?: (cohort: FilmGroupCohort) => void;
+  externalSelectedListId?: string | null;
+  externalSubTab?: 'lists' | 'reviews' | null;
+  externalReviewQuery?: string;
 }
 
 type ReviewMatchMode = 'phrase' | 'whole_word' | 'all_words' | 'any_word';
@@ -134,9 +137,14 @@ export const ListsAndReviewsView: React.FC<ListsAndReviewsViewProps> = ({
   yearRankByTitleYear,
   personalOscarByTitleYear,
   onOpenCohortInAnalytics,
+  externalSelectedListId,
+  externalSubTab,
+  externalReviewQuery,
 }) => {
-  const [subTab, setSubTab] = useState<'lists' | 'reviews'>('lists');
-  const [selectedListId, setSelectedListId] = useState<string>(lists[0]?.id || '');
+  const [subTab, setSubTab] = useState<'lists' | 'reviews'>(externalSubTab || 'lists');
+  const [selectedListId, setSelectedListId] = useState<string>(
+    externalSelectedListId || lists[0]?.id || ''
+  );
 
   // New List Creator State
   const [showNewListForm, setShowNewListForm] = useState(false);
@@ -148,9 +156,29 @@ export const ListsAndReviewsView: React.FC<ListsAndReviewsViewProps> = ({
   const [entryNote, setEntryNote] = useState('');
 
   // FrameSheet Review Phrase Search & Deviation Filter State
-  const [reviewQuery, setReviewQuery] = useState('');
+  const [reviewQuery, setReviewQuery] = useState(externalReviewQuery || '');
   const [reviewMatchMode, setReviewMatchMode] = useState<ReviewMatchMode>('phrase');
   const [onlyModifiedReviews, setOnlyModifiedReviews] = useState(false);
+
+  React.useEffect(() => {
+    if (externalSelectedListId) {
+      setSelectedListId(externalSelectedListId);
+      setSubTab('lists');
+    }
+  }, [externalSelectedListId]);
+
+  React.useEffect(() => {
+    if (externalSubTab) {
+      setSubTab(externalSubTab);
+    }
+  }, [externalSubTab]);
+
+  React.useEffect(() => {
+    if (typeof externalReviewQuery === 'string' && externalReviewQuery.trim()) {
+      setReviewQuery(externalReviewQuery);
+      setSubTab('reviews');
+    }
+  }, [externalReviewQuery]);
 
   const activeList = lists.find((l) => l.id === selectedListId) || lists[0];
 
