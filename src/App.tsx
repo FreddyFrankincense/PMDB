@@ -766,17 +766,30 @@ export default function App() {
 
   const handleAddOrUpdateProfile = useCallback(
     (newProfile: ProfileAccount, setAsActive: boolean) => {
+      let resolvedProfileId = newProfile.id;
       setProfiles((prev) => {
-        const exists = prev.some((p) => p.id === newProfile.id);
-        const updatedList = exists
-          ? prev.map((p) => (p.id === newProfile.id ? newProfile : p))
-          : [newProfile, ...prev];
+        const existingMatch = prev.find(
+          (p) =>
+            p.id === newProfile.id ||
+            (p.sourceType === 'external_scrape' &&
+              newProfile.sourceType === 'external_scrape' &&
+              p.username.toLowerCase() === newProfile.username.toLowerCase())
+        );
+        if (existingMatch) {
+          resolvedProfileId = existingMatch.id;
+        }
+        const normalizedProfile: ProfileAccount = {
+          ...newProfile,
+          id: resolvedProfileId,
+        };
+        const updatedList = existingMatch
+          ? prev.map((p) => (p.id === resolvedProfileId ? normalizedProfile : p))
+          : [normalizedProfile, ...prev];
         return propagateMetadataAcrossAllProfiles(archive, updatedList);
       });
       if (setAsActive) {
-        setActiveProfileId(newProfile.id);
+        setActiveProfileId(resolvedProfileId);
         setArchive((prev) => syncProfileFilmsIntoArchive(newProfile.films, prev));
-        setActiveTab((prevTab) => (prevTab === 'sources' ? 'spreadsheet' : prevTab));
       }
     },
     [archive]
@@ -1965,8 +1978,8 @@ export default function App() {
                   setProfiles((prev) =>
                     propagateMetadataAcrossAllProfiles(
                       restoredArchive,
-                      prev.map((p, idx) =>
-                        idx === 0 ? syncArchiveIntoProfile(restoredArchive, p) : p
+                      prev.map((p) =>
+                        p.id === activeProfileId ? syncArchiveIntoProfile(restoredArchive, p) : p
                       )
                     )
                   );

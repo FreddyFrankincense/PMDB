@@ -219,8 +219,8 @@ export function resolveFilmMetadata(title: string, year?: number, slug?: string)
   const normalizedTitle = title.trim().toLowerCase();
   const match = FILM_CATALOG.find(
     (f) =>
-      f.title.toLowerCase() === normalizedTitle ||
-      (slug && f.slug.toLowerCase() === slug.toLowerCase())
+      (slug && f.slug.toLowerCase() === slug.toLowerCase()) ||
+      (f.title.toLowerCase() === normalizedTitle && (!year || f.year === year))
   );
   if (match) {
     return match;

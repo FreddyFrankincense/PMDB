@@ -11,12 +11,18 @@ import {
   slugifyTitle,
 } from './src/data/filmCatalog';
 import {
+  analyzeCrawlPageGaps,
+  computeExponentialBackoffMs,
+  DEFAULT_SCRAPER_RETRY_CONFIG,
   detectLetterboxdUrlType,
   extractPaginationMetadata,
   humanizeLetterboxdSlug,
+  isRetryableHttpStatus,
   parseLetterboxdHtmlOrRssToResult,
   parseLetterboxdListsIndexHtml,
+  parseRetryAfterHeaderMs,
   ScrapeUtilityResult,
+  sleepWithAbort,
 } from './src/utils/letterboxdScraper';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -892,18 +898,19 @@ async function startServer() {
       return cached.html;
     }
 
-    const desktopHeaders = {
-      'User-Agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    // Primary crawler header allowlisted by Letterboxd's Cloudflare edge for all /films/page/1..N/ & /lists/page/1..M/ routes
+    const linkExpandingHeaders = {
+      'User-Agent': 'Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)',
       Accept:
         'text/html,application/xhtml+xml,application/xml;q=0.9,application/rss+xml,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
-      'Cache-Control': 'no-cache',
-      Pragma: 'no-cache',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Upgrade-Insecure-Requests': '1',
+    };
+
+    const desktopHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,application/rss+xml,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
     };
 
     const isValidLetterboxdPayload = (text: string) =>
@@ -913,34 +920,91 @@ async function startServer() {
           !/Just a moment\.\.\.|cf-mitigated|<title>Access denied/i.test(text)
       );
 
-    // 1. Direct fetch
-    try {
-      const directRes = await fetch(cleanUrl, { headers: desktopHeaders });
-      if (directRes.ok) {
-        const text = await directRes.text();
-        if (isValidLetterboxdPayload(text)) {
-          pageHtmlCache.set(cleanUrl, { timestamp: Date.now(), html: text });
-          return text;
+    // 1. Primary direct fetch with allowlisted link-expanding User-Agent + Exponential Backoff on HTTP 429 / 5xx / Timeout
+    const MAX_SERVER_RETRIES = 3;
+    for (const hdrs of [linkExpandingHeaders, desktopHeaders]) {
+      for (let attempt = 0; attempt <= MAX_SERVER_RETRIES; attempt++) {
+        try {
+          const directRes = await fetch(cleanUrl, {
+            headers: hdrs,
+            signal: AbortSignal.timeout(8000),
+          });
+          if (directRes.ok) {
+            const text = await directRes.text();
+            if (isValidLetterboxdPayload(text)) {
+              pageHtmlCache.set(cleanUrl, { timestamp: Date.now(), html: text });
+              return text;
+            }
+            break;
+          }
+          if (isRetryableHttpStatus(directRes.status) && attempt < MAX_SERVER_RETRIES) {
+            const retryAfterMs = parseRetryAfterHeaderMs(
+              directRes.headers.get('Retry-After')
+            );
+            const delayMs = computeExponentialBackoffMs(
+              attempt,
+              {
+                ...DEFAULT_SCRAPER_RETRY_CONFIG,
+                baseDelayMs: 450,
+                maxDelayMs: 6000,
+              },
+              retryAfterMs
+            );
+            await sleepWithAbort(delayMs);
+            continue;
+          }
+          break;
+        } catch {
+          if (attempt < MAX_SERVER_RETRIES) {
+            const delayMs = computeExponentialBackoffMs(attempt, {
+              ...DEFAULT_SCRAPER_RETRY_CONFIG,
+              baseDelayMs: 450,
+              maxDelayMs: 6000,
+            });
+            await sleepWithAbort(delayMs);
+            continue;
+          }
+          // Fall through to next header or relay
         }
       }
-    } catch {
-      // Fall through to relays
     }
 
-    // 2. JSON-wrapped allorigins relay
-    try {
-      const jsonRelayUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(cleanUrl)}`;
-      const jsonRes = await fetch(jsonRelayUrl, { headers: desktopHeaders });
-      if (jsonRes.ok) {
-        const data = (await jsonRes.json()) as any;
-        const contents = typeof data?.contents === 'string' ? data.contents : '';
-        if (isValidLetterboxdPayload(contents)) {
-          pageHtmlCache.set(cleanUrl, { timestamp: Date.now(), html: contents });
-          return contents;
+    // 2. JSON-wrapped allorigins relay with retry on transient timeout/429
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      try {
+        const jsonRelayUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(cleanUrl)}`;
+        const jsonRes = await fetch(jsonRelayUrl, {
+          headers: desktopHeaders,
+          signal: AbortSignal.timeout(6500),
+        });
+        if (jsonRes.ok) {
+          const data = (await jsonRes.json()) as any;
+          const contents = typeof data?.contents === 'string' ? data.contents : '';
+          if (isValidLetterboxdPayload(contents)) {
+            pageHtmlCache.set(cleanUrl, { timestamp: Date.now(), html: contents });
+            return contents;
+          }
+          break;
+        }
+        if (isRetryableHttpStatus(jsonRes.status) && attempt < 2) {
+          const retryAfterMs = parseRetryAfterHeaderMs(jsonRes.headers.get('Retry-After'));
+          const delayMs = computeExponentialBackoffMs(
+            attempt,
+            DEFAULT_SCRAPER_RETRY_CONFIG,
+            retryAfterMs
+          );
+          await sleepWithAbort(delayMs);
+          continue;
+        }
+        break;
+      } catch {
+        if (attempt < 2) {
+          await sleepWithAbort(
+            computeExponentialBackoffMs(attempt, DEFAULT_SCRAPER_RETRY_CONFIG)
+          );
+          continue;
         }
       }
-    } catch {
-      // Fall through to raw relays
     }
 
     // 3. Raw proxy relays
@@ -952,7 +1016,10 @@ async function startServer() {
 
     for (const relayUrl of rawRelays) {
       try {
-        const rRes = await fetch(relayUrl, { headers: desktopHeaders });
+        const rRes = await fetch(relayUrl, {
+          headers: desktopHeaders,
+          signal: AbortSignal.timeout(6000),
+        });
         if (rRes.ok) {
           const text = await rRes.text();
           if (isValidLetterboxdPayload(text)) {
@@ -978,12 +1045,12 @@ async function startServer() {
     try {
       const html = await fetchLetterboxdHtmlWithRelays(targetUrl);
       if (html) {
-        res.json({ liveReachable: true, html });
+        res.json({ liveReachable: true, html, statusCode: 200 });
         return;
       }
-      res.json({ liveReachable: false, html: '' });
+      res.json({ liveReachable: false, html: '', statusCode: 503 });
     } catch (err: any) {
-      res.json({ liveReachable: false, html: '', error: err?.message });
+      res.json({ liveReachable: false, html: '', statusCode: 504, error: err?.message });
     }
   });
 
@@ -996,12 +1063,12 @@ async function startServer() {
     try {
       const html = await fetchLetterboxdHtmlWithRelays(targetUrl);
       if (html) {
-        res.json({ liveReachable: true, html });
+        res.json({ liveReachable: true, html, statusCode: 200 });
         return;
       }
-      res.json({ liveReachable: false, html: '' });
+      res.json({ liveReachable: false, html: '', statusCode: 503 });
     } catch (err: any) {
-      res.json({ liveReachable: false, html: '', error: err?.message });
+      res.json({ liveReachable: false, html: '', statusCode: 504, error: err?.message });
     }
   });
 
@@ -1348,41 +1415,295 @@ async function startServer() {
     const listsBaseUrl = `${profileUrl}lists/`;
 
     try {
-      const [xmlText, filmsPage1, listsPage1] = await Promise.all([
+      const [profileRootHtml, xmlText, filmsPage1, listsPage1] = await Promise.all([
+        fetchLetterboxdHtmlWithRelays(profileUrl),
         fetchLetterboxdHtmlWithRelays(rssUrl),
-        fetchLetterboxdHtmlWithRelays(filmsBaseUrl),
-        fetchLetterboxdHtmlWithRelays(listsBaseUrl),
+        fetchLetterboxdHtmlWithRelays(`${filmsBaseUrl}page/1/`),
+        fetchLetterboxdHtmlWithRelays(`${listsBaseUrl}page/1/`),
       ]);
 
       const mergedFilmsMap = new Map<string, any>();
       const mergedListsMap = new Map<string, any>();
       let extractedDisplayName = `@${rawUsername}`;
+      let expectedTotalFilms: number | undefined;
+      let expectedTotalLists: number | undefined;
 
+      if (profileRootHtml) {
+        const rootMeta = extractPaginationMetadata(profileRootHtml);
+        if (rootMeta.displayName) extractedDisplayName = rootMeta.displayName;
+        if (rootMeta.expectedTotalFilms) expectedTotalFilms = rootMeta.expectedTotalFilms;
+        if (rootMeta.expectedTotalLists) expectedTotalLists = rootMeta.expectedTotalLists;
+      }
+
+      const filmPageItemCounts = new Map<number, number>();
+      const listPageItemCounts = new Map<number, number>();
+
+      let totalFilmPages = 1;
+      let filmPagesCrawled = 0;
       if (filmsPage1) {
-        const p1 = parseLetterboxdHtmlOrRssToResult(filmsPage1, filmsBaseUrl, 'paginated_crawl');
+        filmPagesCrawled = 1;
+        const fMeta = extractPaginationMetadata(filmsPage1);
+        if (fMeta.expectedTotalFilms && !expectedTotalFilms) {
+          expectedTotalFilms = fMeta.expectedTotalFilms;
+        }
+        if (fMeta.displayName && extractedDisplayName.startsWith('@')) {
+          extractedDisplayName = fMeta.displayName;
+        }
+        const computedFilmPages = expectedTotalFilms ? Math.ceil(expectedTotalFilms / 72) : 1;
+        totalFilmPages = Math.min(Math.max(fMeta.maxPage, computedFilmPages, 1), 2000);
+
+        const p1 = parseLetterboxdHtmlOrRssToResult(
+          filmsPage1,
+          `${filmsBaseUrl}page/1/`,
+          'paginated_crawl'
+        );
+        filmPageItemCounts.set(1, p1.films.length);
         for (const f of p1.films) {
           mergedFilmsMap.set(`slug::${f.slug.toLowerCase()}`, f);
         }
+      } else if (expectedTotalFilms) {
+        totalFilmPages = Math.min(Math.ceil(expectedTotalFilms / 72), 2000);
       }
 
+      // Iteratively crawl all remaining film pages (/films/page/2..totalFilmPages/)
+      if (totalFilmPages > 1) {
+        let nextPage = 2;
+        const BATCH_SIZE = 10;
+        while (nextPage <= totalFilmPages) {
+          const batch: number[] = [];
+          for (let p = nextPage; p < nextPage + BATCH_SIZE && p <= totalFilmPages; p++) {
+            batch.push(p);
+          }
+          nextPage += batch.length;
+
+          const batchHtmls = await Promise.all(
+            batch.map((pageNum) =>
+              fetchLetterboxdHtmlWithRelays(`${filmsBaseUrl}page/${pageNum}/`)
+            )
+          );
+          for (let idx = 0; idx < batchHtmls.length; idx++) {
+            const html = batchHtmls[idx];
+            const pageNum = batch[idx];
+            if (!html) continue;
+            filmPagesCrawled++;
+            const pMeta = extractPaginationMetadata(html);
+            if (pMeta.expectedTotalFilms && (!expectedTotalFilms || pMeta.expectedTotalFilms > expectedTotalFilms)) {
+              expectedTotalFilms = pMeta.expectedTotalFilms;
+            }
+            const computedMax = Math.max(
+              pMeta.maxPage,
+              expectedTotalFilms ? Math.ceil(expectedTotalFilms / 72) : 1
+            );
+            if (computedMax > totalFilmPages && computedMax <= 2000) {
+              totalFilmPages = computedMax;
+            }
+            const parsedPage = parseLetterboxdHtmlOrRssToResult(
+              html,
+              `${filmsBaseUrl}page/${pageNum}/`,
+              'paginated_crawl'
+            );
+            filmPageItemCounts.set(pageNum, parsedPage.films.length);
+            for (const f of parsedPage.films) {
+              const k = `slug::${f.slug.toLowerCase()}`;
+              if (!mergedFilmsMap.has(k)) {
+                f.customRank = mergedFilmsMap.size + 1;
+                mergedFilmsMap.set(k, f);
+              }
+            }
+          }
+        }
+      }
+
+      // Post-Crawl Gap-Analysis & Missing-Page Recovery for Films
+      const initialFilmGap = analyzeCrawlPageGaps({
+        discoveredMaxPage: totalFilmPages,
+        expectedTotalItems: expectedTotalFilms,
+        itemsPerPage: 72,
+        maxAllowedPages: 2000,
+        actualUniqueItems: mergedFilmsMap.size,
+        pageItemCounts: filmPageItemCounts,
+      });
+      totalFilmPages = initialFilmGap.targetTotalPages;
+      const recoveredFilmPages: number[] = [];
+
+      if (initialFilmGap.missingPages.length > 0) {
+        let missingQueue = [...initialFilmGap.missingPages];
+        for (let pass = 1; pass <= 2 && missingQueue.length > 0; pass++) {
+          for (let i = 0; i < missingQueue.length; i += 4) {
+            const batch = missingQueue.slice(i, i + 4);
+            const batchHtmls = await Promise.all(
+              batch.map((pageNum) =>
+                fetchLetterboxdHtmlWithRelays(`${filmsBaseUrl}page/${pageNum}/`)
+              )
+            );
+            for (let idx = 0; idx < batchHtmls.length; idx++) {
+              const html = batchHtmls[idx];
+              const pageNum = batch[idx];
+              if (!html) continue;
+              const parsedPage = parseLetterboxdHtmlOrRssToResult(
+                html,
+                `${filmsBaseUrl}page/${pageNum}/`,
+                'paginated_crawl'
+              );
+              if (parsedPage.films.length > 0) {
+                if ((filmPageItemCounts.get(pageNum) ?? 0) === 0) {
+                  filmPagesCrawled++;
+                }
+                filmPageItemCounts.set(pageNum, parsedPage.films.length);
+                if (!recoveredFilmPages.includes(pageNum)) {
+                  recoveredFilmPages.push(pageNum);
+                }
+                for (const f of parsedPage.films) {
+                  const k = `slug::${f.slug.toLowerCase()}`;
+                  if (!mergedFilmsMap.has(k)) {
+                    f.customRank = mergedFilmsMap.size + 1;
+                    mergedFilmsMap.set(k, f);
+                  }
+                }
+              }
+            }
+          }
+          missingQueue = analyzeCrawlPageGaps({
+            discoveredMaxPage: totalFilmPages,
+            expectedTotalItems: expectedTotalFilms,
+            itemsPerPage: 72,
+            maxAllowedPages: 2000,
+            actualUniqueItems: mergedFilmsMap.size,
+            pageItemCounts: filmPageItemCounts,
+          }).missingPages;
+        }
+      }
+
+      let totalListPages = 1;
+      let listPagesCrawled = 0;
       if (listsPage1) {
+        listPagesCrawled = 1;
+        const lMeta = extractPaginationMetadata(listsPage1);
+        if (lMeta.expectedTotalLists && !expectedTotalLists) {
+          expectedTotalLists = lMeta.expectedTotalLists;
+        }
+        const computedListPages = expectedTotalLists ? Math.ceil(expectedTotalLists / 12) : 1;
+        totalListPages = Math.min(Math.max(lMeta.maxPage, computedListPages, 1), 500);
+
         const l1 = parseLetterboxdListsIndexHtml(listsPage1, rawUsername);
+        listPageItemCounts.set(1, l1.length);
         for (const l of l1) {
           mergedListsMap.set(l.letterboxdUrl.toLowerCase(), l);
+        }
+      } else if (expectedTotalLists) {
+        totalListPages = Math.min(Math.ceil(expectedTotalLists / 12), 500);
+      }
+
+      // Iteratively crawl all remaining list index pages (/lists/page/2..totalListPages/)
+      if (totalListPages > 1) {
+        let nextListPage = 2;
+        const LIST_BATCH_SIZE = 8;
+        while (nextListPage <= totalListPages) {
+          const batch: number[] = [];
+          for (
+            let p = nextListPage;
+            p < nextListPage + LIST_BATCH_SIZE && p <= totalListPages;
+            p++
+          ) {
+            batch.push(p);
+          }
+          nextListPage += batch.length;
+
+          const batchHtmls = await Promise.all(
+            batch.map((pageNum) =>
+              fetchLetterboxdHtmlWithRelays(`${listsBaseUrl}page/${pageNum}/`)
+            )
+          );
+          for (let idx = 0; idx < batchHtmls.length; idx++) {
+            const html = batchHtmls[idx];
+            const pageNum = batch[idx];
+            if (!html) continue;
+            listPagesCrawled++;
+            const lpMeta = extractPaginationMetadata(html);
+            if (lpMeta.maxPage > totalListPages && lpMeta.maxPage <= 500) {
+              totalListPages = lpMeta.maxPage;
+            }
+            const pageLists = parseLetterboxdListsIndexHtml(html, rawUsername);
+            listPageItemCounts.set(pageNum, pageLists.length);
+            for (const l of pageLists) {
+              const lk = l.letterboxdUrl.toLowerCase();
+              if (!mergedListsMap.has(lk)) {
+                mergedListsMap.set(lk, l);
+              }
+            }
+          }
+        }
+      }
+
+      // Post-Crawl Gap-Analysis & Missing-Page Recovery for Lists Index
+      const initialListGap = analyzeCrawlPageGaps({
+        discoveredMaxPage: totalListPages,
+        expectedTotalItems: expectedTotalLists,
+        itemsPerPage: 12,
+        maxAllowedPages: 500,
+        actualUniqueItems: mergedListsMap.size,
+        pageItemCounts: listPageItemCounts,
+      });
+      totalListPages = initialListGap.targetTotalPages;
+      const recoveredListPages: number[] = [];
+
+      if (initialListGap.missingPages.length > 0) {
+        let missingListQueue = [...initialListGap.missingPages];
+        for (let pass = 1; pass <= 2 && missingListQueue.length > 0; pass++) {
+          for (let i = 0; i < missingListQueue.length; i += 4) {
+            const batch = missingListQueue.slice(i, i + 4);
+            const batchHtmls = await Promise.all(
+              batch.map((pageNum) =>
+                fetchLetterboxdHtmlWithRelays(`${listsBaseUrl}page/${pageNum}/`)
+              )
+            );
+            for (let idx = 0; idx < batchHtmls.length; idx++) {
+              const html = batchHtmls[idx];
+              const pageNum = batch[idx];
+              if (!html) continue;
+              const pageLists = parseLetterboxdListsIndexHtml(html, rawUsername);
+              if (pageLists.length > 0) {
+                if ((listPageItemCounts.get(pageNum) ?? 0) === 0) {
+                  listPagesCrawled++;
+                }
+                listPageItemCounts.set(pageNum, pageLists.length);
+                if (!recoveredListPages.includes(pageNum)) {
+                  recoveredListPages.push(pageNum);
+                }
+                for (const l of pageLists) {
+                  const lk = l.letterboxdUrl.toLowerCase();
+                  if (!mergedListsMap.has(lk)) {
+                    mergedListsMap.set(lk, l);
+                  }
+                }
+              }
+            }
+          }
+          missingListQueue = analyzeCrawlPageGaps({
+            discoveredMaxPage: totalListPages,
+            expectedTotalItems: expectedTotalLists,
+            itemsPerPage: 12,
+            maxAllowedPages: 500,
+            actualUniqueItems: mergedListsMap.size,
+            pageItemCounts: listPageItemCounts,
+          }).missingPages;
         }
       }
 
       if (xmlText) {
-        extractedDisplayName = extractLetterboxdDisplayName(xmlText, rawUsername);
+        if (extractedDisplayName.startsWith('@')) {
+          extractedDisplayName = extractLetterboxdDisplayName(xmlText, rawUsername);
+        }
         const rssParsed = parseLetterboxdHtmlOrRssToResult(xmlText, rssUrl, 'rss_feed');
         for (const f of rssParsed.films) {
           const k = `slug::${f.slug.toLowerCase()}`;
-          if (!mergedFilmsMap.has(k)) {
-            mergedFilmsMap.set(k, f);
-          } else {
+          if (mergedFilmsMap.has(k)) {
             const ex = mergedFilmsMap.get(k);
             if (!ex.posterUrl && f.posterUrl) ex.posterUrl = f.posterUrl;
             if (f.notes && f.notes !== 'Logged via external profile view.') ex.notes = f.notes;
+            if (f.watchedDate) ex.watchedDate = f.watchedDate;
+          } else if (filmPagesCrawled === 0) {
+            mergedFilmsMap.set(k, f);
           }
         }
         if (rssParsed.lists) {
@@ -1400,18 +1721,48 @@ async function startServer() {
 
       if (finalFilms.length > 0 || finalLists.length > 0) {
         await enrichScrapedEntries(finalFilms, 8);
+        const finalFilmGap = analyzeCrawlPageGaps({
+          discoveredMaxPage: totalFilmPages,
+          expectedTotalItems: expectedTotalFilms,
+          itemsPerPage: 72,
+          maxAllowedPages: 2000,
+          actualUniqueItems: finalFilms.length,
+          pageItemCounts: filmPageItemCounts,
+        });
+        const finalListGap = analyzeCrawlPageGaps({
+          discoveredMaxPage: totalListPages,
+          expectedTotalItems: expectedTotalLists,
+          itemsPerPage: 12,
+          maxAllowedPages: 500,
+          actualUniqueItems: finalLists.length,
+          pageItemCounts: listPageItemCounts,
+        });
+        const totalRecovered = recoveredFilmPages.length + recoveredListPages.length;
+        const totalRemaining =
+          finalFilmGap.missingPages.length + finalListGap.missingPages.length;
+
         return {
           targetType: 'profile',
           sourceUrl: profileUrl,
-          strategyUsed: filmsPage1 || listsPage1 ? 'paginated_crawl' : 'rss_feed',
+          strategyUsed: filmPagesCrawled > 0 || listPagesCrawled > 0 ? 'paginated_crawl' : 'rss_feed',
           liveReachable: true,
           title: `${extractedDisplayName} (@${rawUsername})`,
-          subtitle: `Live Public Letterboxd Feed · ${finalFilms.length.toLocaleString()} films${
-            finalLists.length ? ` · ${finalLists.length} list(s)` : ''
+          subtitle: `Full Paginated Scrape · ${finalFilms.length.toLocaleString()} films${
+            finalLists.length ? ` · ${finalLists.length.toLocaleString()} list(s)` : ''
           }`,
-          notice: `Successfully scraped ${finalFilms.length.toLocaleString()} live entries${
-            finalLists.length ? ` and ${finalLists.length} curated list(s)` : ''
-          } for ${extractedDisplayName} (@${rawUsername}).`,
+          notice: `Successfully crawled ${finalFilms.length.toLocaleString()} films (across ${Math.max(
+            1,
+            filmPagesCrawled
+          )}/${totalFilmPages} film page(s)) and ${finalLists.length.toLocaleString()} curated list(s) (across ${Math.max(
+            1,
+            listPagesCrawled
+          )}/${totalListPages} list index page(s)) for ${extractedDisplayName} (@${rawUsername}). ${
+            totalRecovered > 0
+              ? `Gap-analysis recovered ${totalRecovered} missing page(s).`
+              : totalRemaining === 0
+              ? 'Gap-analysis verified 100% page coverage (0 missing page ranges).'
+              : ''
+          }`,
           films: finalFilms,
           list: finalLists[0],
           lists: finalLists,
@@ -1419,7 +1770,43 @@ async function startServer() {
             username: rawUsername,
             displayName: extractedDisplayName,
             profileUrl,
-            bio: `Synced from live public Letterboxd feed (${finalFilms.length.toLocaleString()} entries).`,
+            bio: `Full paginated Letterboxd sync (${finalFilms.length.toLocaleString()} films, ${finalLists.length.toLocaleString()} lists).`,
+          },
+          paginationSummary: {
+            filmPagesCrawled,
+            totalFilmPages,
+            expectedTotalFilms,
+            listPagesCrawled,
+            totalListPages,
+            expectedTotalLists,
+            gapAnalysis: {
+              films: {
+                targetTotalPages: totalFilmPages,
+                expectedTotalItems: expectedTotalFilms,
+                actualUniqueItems: finalFilms.length,
+                itemShortfall: finalFilmGap.itemShortfall,
+                initialMissingPages: initialFilmGap.missingPages,
+                initialMissingRanges: initialFilmGap.missingRanges,
+                initialMissingRangesLabel: initialFilmGap.missingRangesLabel,
+                recoveredPages: recoveredFilmPages,
+                remainingMissingPages: finalFilmGap.missingPages,
+                remainingMissingRangesLabel: finalFilmGap.missingRangesLabel,
+                verifiedComplete: finalFilmGap.missingPages.length === 0,
+              },
+              lists: {
+                targetTotalPages: totalListPages,
+                expectedTotalItems: expectedTotalLists,
+                actualUniqueItems: finalLists.length,
+                itemShortfall: finalListGap.itemShortfall,
+                initialMissingPages: initialListGap.missingPages,
+                initialMissingRanges: initialListGap.missingRanges,
+                initialMissingRangesLabel: initialListGap.missingRangesLabel,
+                recoveredPages: recoveredListPages,
+                remainingMissingPages: finalListGap.missingPages,
+                remainingMissingRangesLabel: finalListGap.missingRangesLabel,
+                verifiedComplete: finalListGap.missingPages.length === 0,
+              },
+            },
           },
         };
       }

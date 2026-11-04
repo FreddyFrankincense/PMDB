@@ -42,6 +42,8 @@ export function filmRecordToFilmEntry(
     existing?.watchlist ??
     false;
 
+  const recordSlug = record.letterboxdUri?.match(/\/film\/([^/"'?#]+)/i)?.[1];
+
   return {
     id: existing?.id || record.id,
     title: record.title,
@@ -50,7 +52,7 @@ export function filmRecordToFilmEntry(
       record.letterboxdUri ||
       existing?.letterboxdUri ||
       `https://letterboxd.com/film/${slugifyTitle(record.title, record.year)}/`,
-    slug: existing?.slug || slugifyTitle(record.title, record.year),
+    slug: existing?.slug || recordSlug || slugifyTitle(record.title, record.year),
     rating,
     watchedDate: isWatchlist
       ? null
@@ -155,19 +157,47 @@ export function syncArchiveIntoProfile(
   archive: CineasteArchiveState,
   profile: ProfileAccount
 ): ProfileAccount {
+  const existingById = new Map<string, number>();
+  const existingBySlug = new Map<string, number>();
   const existingByKey = new Map<string, number>();
   const updatedFilms = [...profile.films];
 
   updatedFilms.forEach((f, idx) => {
-    existingByKey.set(normalizeFilmMatchKey(f.title, f.year), idx);
+    existingById.set(f.id, idx);
+    if (f.slug) {
+      existingBySlug.set(`slug::${f.slug.toLowerCase()}`, idx);
+    }
+    const key = normalizeFilmMatchKey(f.title, f.year);
+    if (!existingByKey.has(key)) {
+      existingByKey.set(key, idx);
+    }
   });
 
+  const claimedIndices = new Set<number>();
   const newEntries: FilmEntry[] = [];
 
   for (const record of Object.values(archive.films)) {
+    const recSlug = record.letterboxdUri?.match(/\/film\/([^/"'?#]+)/i)?.[1];
+    const slugKey = recSlug ? `slug::${recSlug.toLowerCase()}` : undefined;
     const key = normalizeFilmMatchKey(record.title, record.year);
-    const matchIdx = existingByKey.get(key);
-    if (matchIdx !== undefined) {
+
+    let matchIdx =
+      existingById.get(record.id) ??
+      (slugKey ? existingBySlug.get(slugKey) : undefined);
+
+    if (matchIdx === undefined) {
+      const candidateIdx = existingByKey.get(key);
+      if (candidateIdx !== undefined && !claimedIndices.has(candidateIdx)) {
+        const candidateEntry = updatedFilms[candidateIdx];
+        const candidateSlug = candidateEntry?.slug?.toLowerCase();
+        if (!recSlug || !candidateSlug || recSlug.toLowerCase() === candidateSlug) {
+          matchIdx = candidateIdx;
+        }
+      }
+    }
+
+    if (matchIdx !== undefined && !claimedIndices.has(matchIdx)) {
+      claimedIndices.add(matchIdx);
       updatedFilms[matchIdx] = filmRecordToFilmEntry(
         record,
         updatedFilms[matchIdx]
@@ -249,17 +279,41 @@ export function syncProfileFilmsIntoArchive(
 ): CineasteArchiveState {
   const nextFilms: Record<string, FilmRecord> = { ...archive.films };
 
-  // Build lookup by normalized title::year for existing archive records
+  // Build lookup by slug and normalized title::year for existing archive records
   const archiveKeyToId = new Map<string, string>();
   for (const rec of Object.values(nextFilms)) {
-    archiveKeyToId.set(normalizeFilmMatchKey(rec.title, rec.year), rec.id);
+    const recSlug = rec.letterboxdUri?.match(/\/film\/([^/"'?#]+)/i)?.[1];
+    if (recSlug) {
+      archiveKeyToId.set(`slug::${recSlug.toLowerCase()}`, rec.id);
+    }
+    const titleKey = normalizeFilmMatchKey(rec.title, rec.year);
+    if (!archiveKeyToId.has(titleKey)) {
+      archiveKeyToId.set(titleKey, rec.id);
+    }
   }
 
   const seenArchiveIds = new Set<string>();
 
   for (const entry of profileFilms) {
     const key = normalizeFilmMatchKey(entry.title, entry.year);
-    const existingId = archiveKeyToId.get(key) || makeFilmId(entry.title, entry.year);
+    const slugKey = entry.slug ? `slug::${entry.slug.toLowerCase()}` : key;
+    let existingId =
+      archiveKeyToId.get(slugKey) ||
+      archiveKeyToId.get(key) ||
+      makeFilmId(entry.title, entry.year);
+
+    // If another distinct film in the same profile crawl already claimed this title::year ID, disambiguate by slug
+    if (seenArchiveIds.has(existingId) && entry.slug) {
+      const existingRec = nextFilms[existingId];
+      const existingSlugMatch = existingRec?.letterboxdUri?.match(/\/film\/([^/"'?#]+)/i)?.[1];
+      if (
+        existingSlugMatch &&
+        existingSlugMatch.toLowerCase() !== entry.slug.toLowerCase()
+      ) {
+        existingId = makeFilmId(entry.slug, entry.year);
+      }
+    }
+
     const existingRecord = nextFilms[existingId];
 
     // Sync if it already exists in archive, OR is a canonical film, OR is a user-added/imported/scraped film
@@ -273,7 +327,10 @@ export function syncProfileFilmsIntoArchive(
 
     if (shouldIncludeInCatalog) {
       nextFilms[existingId] = filmEntryToFilmRecord(entry, existingRecord);
-      archiveKeyToId.set(key, existingId);
+      archiveKeyToId.set(slugKey, existingId);
+      if (!archiveKeyToId.has(key)) {
+        archiveKeyToId.set(key, existingId);
+      }
       seenArchiveIds.add(existingId);
     }
   }

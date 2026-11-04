@@ -29,6 +29,7 @@ import {
 import {
   applyScrapeResultToWorkspace,
   detectLetterboxdUrlType,
+  formatScraperEta,
   runLetterboxdScraper,
   ScraperProgressUpdate,
 } from '../utils/letterboxdScraper';
@@ -137,6 +138,7 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
       const normalizedFilmUrl = normalizeFilmUrlForScraper(clean);
       const result = await runLetterboxdScraper(normalizedFilmUrl, {
         preferBrowserFetch,
+        onProgress: (progress) => setScrapeProgress(progress),
       });
 
       const scrapedFilm = result.films[0];
@@ -162,12 +164,15 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
       const activeProf = profiles.find((p) => p.id === activeProfileId);
       if (activeProf) {
         const existingMap = new Map(
-          activeProf.films.map((f) => [`${f.title.toLowerCase()}::${f.year}`, f])
+          activeProf.films.map((f) => [
+            f.slug ? `slug::${f.slug.toLowerCase()}` : `${f.title.toLowerCase()}::${f.year}`,
+            f,
+          ])
         );
-        existingMap.set(
-          `${scrapedFilm.title.toLowerCase()}::${scrapedFilm.year}`,
-          scrapedFilm
-        );
+        const filmKey = scrapedFilm.slug
+          ? `slug::${scrapedFilm.slug.toLowerCase()}`
+          : `${scrapedFilm.title.toLowerCase()}::${scrapedFilm.year}`;
+        existingMap.set(filmKey, scrapedFilm);
         onAddOrUpdateProfile(
           {
             ...activeProf,
@@ -219,14 +224,14 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
         abortSignal: abortController.signal,
       });
 
-      if (archive && onRestoreUnifiedWorkspace) {
-        const { nextArchive } = applyScrapeResultToWorkspace(result, archive);
-        onRestoreUnifiedWorkspace({ archive: nextArchive });
-      }
-
       if (result.profile) {
+        const existingMatch = profiles.find(
+          (p) =>
+            p.sourceType === 'external_scrape' &&
+            p.username.toLowerCase() === result.profile!.username.toLowerCase()
+        );
         const newProfile: ProfileAccount = {
-          id: `profile-${result.profile.username}-${Date.now()}`,
+          id: existingMatch?.id || `profile-${result.profile.username}-${Date.now()}`,
           username: result.profile.username,
           displayName: result.profile.displayName || result.profile.username,
           sourceType: 'external_scrape',
@@ -236,25 +241,48 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
           films: cloneFilmsArray(result.films),
           baselineFilms: cloneFilmsArray(result.films),
         };
-        onAddOrUpdateProfile(newProfile, true);
-      } else if (result.films.length > 0) {
-        const activeProf = profiles.find((p) => p.id === activeProfileId);
-        if (activeProf) {
-          const existingMap = new Map(
-            activeProf.films.map((f) => [`${f.title.toLowerCase()}::${f.year}`, f])
-          );
-          result.films.forEach((f) => {
-            existingMap.set(`${f.title.toLowerCase()}::${f.year}`, f);
+        if (archive && onRestoreUnifiedWorkspace) {
+          const { nextArchive } = applyScrapeResultToWorkspace(result, archive);
+          const updatedProfiles = existingMatch
+            ? profiles.map((p) => (p.id === newProfile.id ? newProfile : p))
+            : [newProfile, ...profiles];
+          onRestoreUnifiedWorkspace({
+            archive: nextArchive,
+            profiles: updatedProfiles,
           });
-          const merged = Array.from(existingMap.values());
-          onAddOrUpdateProfile(
-            {
-              ...activeProf,
-              lastSyncedAt: new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC',
-              films: cloneFilmsArray(merged),
-            },
-            false
-          );
+        } else {
+          onAddOrUpdateProfile(newProfile, true);
+        }
+      } else {
+        if (archive && onRestoreUnifiedWorkspace) {
+          const { nextArchive } = applyScrapeResultToWorkspace(result, archive);
+          onRestoreUnifiedWorkspace({ archive: nextArchive });
+        }
+        if (result.films.length > 0) {
+          const activeProf = profiles.find((p) => p.id === activeProfileId);
+          if (activeProf) {
+            const existingMap = new Map(
+              activeProf.films.map((f) => [
+                f.slug ? `slug::${f.slug.toLowerCase()}` : `${f.title.toLowerCase()}::${f.year}`,
+                f,
+              ])
+            );
+            result.films.forEach((f) => {
+              const k = f.slug
+                ? `slug::${f.slug.toLowerCase()}`
+                : `${f.title.toLowerCase()}::${f.year}`;
+              existingMap.set(k, f);
+            });
+            const merged = Array.from(existingMap.values());
+            onAddOrUpdateProfile(
+              {
+                ...activeProf,
+                lastSyncedAt: new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC',
+                films: cloneFilmsArray(merged),
+              },
+              false
+            );
+          }
         }
       }
 
@@ -422,6 +450,30 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
     }
   };
 
+  const handleExportPmdbArchiveJson = () => {
+    if (!archive) return;
+    const archivePayload = {
+      ...archive,
+      lastImportedAt: archive.lastImportedAt || new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(archivePayload, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pmdb-archive-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    const filmCount = Object.keys(archive.films || {}).length;
+    const listCount = (archive.lists || []).length;
+    const rankingYears = Object.keys(archive.yearlyRankings || {}).length;
+    const ballotYears = Object.keys(archive.oscarBallots || {}).length;
+    setBackupNotice(
+      `Exported PMDB Archive State JSON (${filmCount.toLocaleString()} films, ${listCount.toLocaleString()} curated lists, ${rankingYears} annual rankings, ${ballotYears} Oscar ballots).`
+    );
+  };
+
   const handleExportUnifiedBackupJson = () => {
     const payload = {
       version: 2,
@@ -453,29 +505,77 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
           profiles: parsed.profiles,
         });
         setBackupNotice('Restored PMDB unified workspace backup successfully.');
-      } else if (parsed.films && parsed.oscarBallots) {
-        onRestoreUnifiedWorkspace({ archive: parsed });
-        setBackupNotice('Restored PMDB archive backup successfully.');
+      } else if (parsed.films && typeof parsed.films === 'object') {
+        onRestoreUnifiedWorkspace({
+          archive: {
+            films: parsed.films || {},
+            yearlyRankings: parsed.yearlyRankings || {},
+            oscarBallots: parsed.oscarBallots || {},
+            lists: Array.isArray(parsed.lists) ? parsed.lists : [],
+            lastImportedAt: parsed.lastImportedAt || new Date().toISOString(),
+          },
+        });
+        setBackupNotice(
+          `Restored PMDB Archive State JSON (${Object.keys(parsed.films).length.toLocaleString()} films & ${(parsed.lists || []).length.toLocaleString()} curated lists).`
+        );
+      } else {
+        setBackupNotice('Unrecognized JSON backup structure.');
       }
     } catch {
       setBackupNotice('Invalid JSON backup file.');
     }
+    e.target.value = '';
   };
 
   const archiveFilmsList = archive ? Object.values(archive.films) : [];
+  const archiveListsCount = archive ? (archive.lists || []).length : 0;
+  const archiveRankingsCount = archive ? Object.keys(archive.yearlyRankings || {}).length : 0;
+  const archiveBallotsCount = archive ? Object.keys(archive.oscarBallots || {}).length : 0;
   const enrichedPosterCount = archiveFilmsList.filter((f) => Boolean(f.metadata?.posterUrl)).length;
   const unenrichedCount = Math.max(0, archiveFilmsList.length - enrichedPosterCount);
 
   return (
     <div className="space-y-6">
-      {/* Loaded Profiles Registry */}
+      {/* Loaded Profiles Registry & Quick PMDB Archive JSON Backup Header */}
       <div className="bg-slate-900 border border-slate-800 rounded-lg p-5">
-        <h3 className="text-sm font-display font-semibold text-slate-100 mb-1">
-          Loaded Letterboxd Profiles in Workspace
-        </h3>
-        <p className="text-xs text-slate-400 mb-4">
-          Switch active profiles for the Poster Catalog, Spreadsheet, Rankings, &amp; Ballots, or manage accounts available for side-by-side comparison.
-        </p>
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-sm font-display font-semibold text-slate-100 mb-1">
+              Loaded Letterboxd Profiles in Workspace
+            </h3>
+            <p className="text-xs text-slate-400">
+              Switch active profiles for the Poster Catalog, Spreadsheet, Rankings, &amp; Ballots, or export your current PMDB archive state as a portable JSON backup.
+            </p>
+          </div>
+          {archive && (
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleExportPmdbArchiveJson}
+                title="Export the current PMDB Archive State (films, ratings, reviews, curated lists, annual rankings, and Oscar ballots) as a JSON file"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-md transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export PMDB Archive (.json)</span>
+                <span className="font-mono tabular-nums text-[11px] px-1.5 py-0.5 rounded bg-slate-950/20">
+                  {archiveFilmsList.length.toLocaleString()} films
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
+        {backupNotice && (
+          <div className="p-2.5 mb-4 rounded bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300 flex items-center justify-between gap-2">
+            <span>{backupNotice}</span>
+            <button
+              type="button"
+              onClick={() => setBackupNotice(null)}
+              className="text-[11px] font-mono text-emerald-400 hover:underline shrink-0 cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {profiles.map((p) => {
@@ -907,53 +1007,197 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
                   )}
                 </form>
 
-                {/* Live Multi-Page Crawler Progress Telemetry */}
-                {scrapeProgress && (scrapeLoading || scrapeProgress.phase === 'complete') && (
-                  <div className="mt-4 p-3.5 rounded-lg bg-slate-900 border border-amber-500/30 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="font-medium text-amber-300 flex items-center gap-1.5">
-                        {scrapeLoading ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                {/* Live Multi-Page Crawler Progress Bar, Status Indicator & ETA Telemetry */}
+                {scrapeProgress && (scrapeLoading || filmScrapeLoading || scrapeProgress.phase === 'complete') && (
+                  <div className="mt-4 p-4 rounded-lg bg-slate-900/95 border border-amber-500/35 space-y-3">
+                    {/* Status Indicator Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {scrapeLoading || filmScrapeLoading ? (
+                          <span className="relative flex h-2.5 w-2.5 shrink-0">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500" />
+                          </span>
                         ) : (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                         )}
-                        {scrapeProgress.message}
-                      </span>
-                      {scrapeLoading && scrapeAbortRef.current && (
-                        <button
-                          type="button"
-                          onClick={() => scrapeAbortRef.current?.abort()}
-                          className="px-2.5 py-1 text-[11px] font-mono bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded cursor-pointer shrink-0"
-                        >
-                          Stop &amp; Save Progress
-                        </button>
-                      )}
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono text-[11px] uppercase tracking-wider text-amber-400 font-semibold">
+                              {scrapeProgress.phaseLabel}
+                            </span>
+                            <span className="text-slate-600">·</span>
+                            <span className="font-mono tabular-nums text-[11px] text-slate-300">
+                              {scrapeProgress.percentComplete}% Complete
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-200 truncate mt-0.5">
+                            {scrapeProgress.message}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {(scrapeProgress.gapAnalysisActive ||
+                          scrapeProgress.phase === 'complete' ||
+                          (scrapeProgress.gapPagesRecovered ?? 0) > 0) && (
+                          <span
+                            title="Post-crawl total item verification and missing page range recovery"
+                            className={`px-2 py-0.5 text-[10px] font-mono tabular-nums rounded border ${
+                              scrapeProgress.gapAnalysisActive
+                                ? 'bg-sky-500/15 text-sky-300 border-sky-500/35'
+                                : (scrapeProgress.missingPagesQueued ?? 0) === 0
+                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                : 'bg-amber-500/15 text-amber-300 border-amber-500/35'
+                            }`}
+                          >
+                            {scrapeProgress.gapAnalysisActive
+                              ? `Gap Queue: ${scrapeProgress.missingPagesQueued ?? 0} pg (${scrapeProgress.missingRangesLabel || 'scanning'})`
+                              : (scrapeProgress.gapPagesRecovered ?? 0) > 0
+                              ? `Gap-Analysis: Recovered ${scrapeProgress.gapPagesRecovered} pg`
+                              : 'Gap-Analysis: 0 Missing Pages'}
+                          </span>
+                        )}
+                        {(scrapeProgress.retryCount ?? 0) > 0 && (
+                          <span
+                            title="Transient HTTP 429 or network timeout automatically recovered via exponential backoff"
+                            className="px-2 py-0.5 text-[10px] font-mono tabular-nums bg-amber-500/15 text-amber-300 border border-amber-500/35 rounded"
+                          >
+                            Backoff Retries: {scrapeProgress.retryCount}
+                            {scrapeProgress.lastBackoffDelayMs
+                              ? ` (${(scrapeProgress.lastBackoffDelayMs / 1000).toFixed(1)}s)`
+                              : ''}
+                          </span>
+                        )}
+                        {scrapeLoading && scrapeAbortRef.current && (
+                          <button
+                            type="button"
+                            onClick={() => scrapeAbortRef.current?.abort()}
+                            className="px-2.5 py-1 text-[11px] font-mono bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded cursor-pointer shrink-0"
+                          >
+                            Stop &amp; Save Progress
+                          </button>
+                        )}
+                      </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2 text-[11px] font-mono tabular-nums">
-                      <div className="p-2 rounded bg-slate-950 border border-slate-800">
-                        <span className="text-slate-400 block">Watched Films Crawled</span>
-                        <span className="text-slate-100 font-semibold">
-                          {scrapeProgress.filmsScraped.toLocaleString()}
-                          {scrapeProgress.expectedTotalFilms
-                            ? ` / ${scrapeProgress.expectedTotalFilms.toLocaleString()}`
-                            : ''}
+                    {/* Detailed Visual Progress Bar */}
+                    <div className="space-y-1">
+                      <div
+                        role="progressbar"
+                        aria-valuenow={scrapeProgress.percentComplete}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label="Letterboxd collection crawl progress"
+                        className="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden border border-slate-800"
+                      >
+                        <div
+                          className={`h-full transition-all duration-300 rounded-full ${
+                            scrapeProgress.phase === 'complete'
+                              ? 'bg-emerald-500'
+                              : 'bg-gradient-to-r from-amber-500 via-amber-400 to-emerald-400'
+                          }`}
+                          style={{ width: `${Math.max(4, scrapeProgress.percentComplete)}%` }}
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between text-[11px] font-mono tabular-nums text-slate-400">
+                        <span>
+                          Active Phase Page {scrapeProgress.currentPage.toLocaleString()} of{' '}
+                          {scrapeProgress.totalPages.toLocaleString()}
                         </span>
-                        <span className="text-slate-500 ml-1.5">
-                          (Page {scrapeProgress.currentFilmPage}/{scrapeProgress.totalFilmPages})
+                        <span>
+                          Overall Crawl: {scrapeProgress.overallPagesCompleted.toLocaleString()} /{' '}
+                          {scrapeProgress.overallTotalPages.toLocaleString()} pages
                         </span>
                       </div>
-                      <div className="p-2 rounded bg-slate-950 border border-slate-800">
-                        <span className="text-slate-400 block">Curated Lists Crawled</span>
-                        <span className="text-amber-300 font-semibold">
-                          {scrapeProgress.listsScraped.toLocaleString()}
-                          {scrapeProgress.expectedTotalLists
-                            ? ` / ${scrapeProgress.expectedTotalLists.toLocaleString()}`
-                            : ''}
+                    </div>
+
+                    {/* 4-Metric Telemetry Grid: Current Page, Total Items Discovered, Collection Breakdown, Remaining ETA */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px] font-mono tabular-nums">
+                      {/* 1. Current Page Number */}
+                      <div className="p-2.5 rounded bg-slate-950 border border-slate-800/90">
+                        <span className="text-slate-400 block text-[10px] uppercase tracking-wider">
+                          Current Page Number
                         </span>
-                        <span className="text-slate-500 ml-1.5">
-                          (Page {scrapeProgress.currentListPage}/{scrapeProgress.totalListPages})
+                        <div className="mt-0.5 flex items-baseline justify-between gap-2">
+                          <span className="text-slate-100 font-semibold text-xs">
+                            Page {scrapeProgress.currentPage.toLocaleString()} of{' '}
+                            {scrapeProgress.totalPages.toLocaleString()}
+                          </span>
+                          <span className="text-slate-400 text-[10px]">
+                            Total {scrapeProgress.overallPagesCompleted}/{scrapeProgress.overallTotalPages} pgs
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* 2. Total Items Discovered */}
+                      <div className="p-2.5 rounded bg-slate-950 border border-slate-800/90">
+                        <span className="text-slate-400 block text-[10px] uppercase tracking-wider">
+                          Total Items Discovered
                         </span>
+                        <div className="mt-0.5 flex items-baseline justify-between gap-2">
+                          <span className="text-emerald-300 font-semibold text-xs">
+                            {scrapeProgress.totalItemsDiscovered.toLocaleString()} items
+                          </span>
+                          <span className="text-slate-400 text-[10px]">
+                            {scrapeProgress.filmsScraped.toLocaleString()} films ·{' '}
+                            {scrapeProgress.listsScraped.toLocaleString()} lists
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* 3. Collection Progress Breakdown (Films + Lists) */}
+                      <div className="p-2.5 rounded bg-slate-950 border border-slate-800/90">
+                        <span className="text-slate-400 block text-[10px] uppercase tracking-wider">
+                          Films &amp; Lists Crawl Breakdown
+                        </span>
+                        <div className="mt-0.5 text-slate-200 flex flex-wrap items-center justify-between gap-1">
+                          <span>
+                            Films:{' '}
+                            <strong className="text-slate-100">
+                              {scrapeProgress.filmsScraped.toLocaleString()}
+                              {scrapeProgress.expectedTotalFilms
+                                ? `/${scrapeProgress.expectedTotalFilms.toLocaleString()}`
+                                : ''}
+                            </strong>{' '}
+                            <span className="text-slate-500">
+                              (p.{scrapeProgress.currentFilmPage}/{scrapeProgress.totalFilmPages})
+                            </span>
+                          </span>
+                          <span>
+                            Lists:{' '}
+                            <strong className="text-amber-300">
+                              {scrapeProgress.listsScraped.toLocaleString()}
+                              {scrapeProgress.expectedTotalLists
+                                ? `/${scrapeProgress.expectedTotalLists.toLocaleString()}`
+                                : ''}
+                            </strong>{' '}
+                            <span className="text-slate-500">
+                              (p.{scrapeProgress.currentListPage}/{scrapeProgress.totalListPages})
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* 4. Remaining Estimated Time (ETA) */}
+                      <div className="p-2.5 rounded bg-slate-950 border border-slate-800/90">
+                        <span className="text-slate-400 block text-[10px] uppercase tracking-wider">
+                          Estimated Time to Finish
+                        </span>
+                        <div className="mt-0.5 flex items-baseline justify-between gap-2">
+                          <span className="text-amber-300 font-semibold text-xs">
+                            {formatScraperEta(
+                              scrapeProgress.estimatedRemainingMs,
+                              scrapeProgress.phase === 'complete',
+                              scrapeProgress.elapsedMs
+                            )}
+                          </span>
+                          <span className="text-slate-400 text-[10px]">
+                            {scrapeProgress.pagesPerSecond > 0
+                              ? `${scrapeProgress.pagesPerSecond.toFixed(1)} pages/s`
+                              : 'Measuring speed'}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1215,12 +1459,26 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
             <div className="flex items-center gap-2 mb-1">
               <Database className="w-4 h-4 text-sky-400" />
               <h3 className="text-sm font-display font-semibold text-slate-100">
-                4. Full Unified Workspace JSON Backup &amp; Restore
+                4. PMDB Archive State &amp; Workspace JSON Backup
               </h3>
             </div>
-            <p className="text-xs text-slate-400 mb-4">
-              Save or restore your entire combined workspace — including all loaded Letterboxd profiles, Source-of-Truth baselines, Annual Ranked Lists (1927–2026), Personal Oscar Ballots, and Curated Lists — in a single JSON file.
+            <p className="text-xs text-slate-400 mb-3">
+              Export your current PMDB archive state (<code className="font-mono text-amber-300">pmdb-archive-backup.json</code>) containing your entire film catalog, enriched theatrical posters &amp; credits, Curated Lists, Annual Rankings (1927–2026), and Personal Oscar Ballots, or export/restore the full multi-profile workspace.
             </p>
+            <div className="p-3 bg-slate-950 border border-slate-800 rounded-md flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums text-slate-300 mb-4">
+              <span>
+                Catalog: <strong className="text-amber-300">{archiveFilmsList.length.toLocaleString()}</strong> films
+              </span>
+              <span>
+                Lists: <strong className="text-emerald-400">{archiveListsCount.toLocaleString()}</strong>
+              </span>
+              <span>
+                Rankings: <strong className="text-slate-100">{archiveRankingsCount}</strong> yrs
+              </span>
+              <span>
+                Ballots: <strong className="text-slate-100">{archiveBallotsCount}</strong> yrs
+              </span>
+            </div>
             {backupNotice && (
               <div className="p-2.5 mb-3 rounded bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
                 {backupNotice}
@@ -1228,17 +1486,28 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
+            {archive && (
+              <button
+                type="button"
+                onClick={handleExportPmdbArchiveJson}
+                className="flex-1 py-2 px-3 text-xs font-medium bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-md transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export PMDB Archive State (.json)</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={handleExportUnifiedBackupJson}
-              className="flex-1 py-2 px-3 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-md transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              className="flex-1 py-2 px-3 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-md transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5 text-amber-400" />
               <span>Export Full Workspace (.json)</span>
             </button>
 
-            <label className="flex-1 py-2 px-3 text-xs font-medium bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-md transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer">
+            <label className="flex-1 py-2 px-3 text-xs font-medium bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-md transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap">
               <Upload className="w-3.5 h-3.5 text-sky-400" />
               <span>Restore Backup (.json)</span>
               <input

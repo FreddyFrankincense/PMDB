@@ -25,6 +25,7 @@ import {
 import {
   applyScrapeResultToWorkspace,
   detectLetterboxdUrlType,
+  formatScraperEta,
   runLetterboxdScraper,
   ScraperProgressUpdate,
   ScrapeUtilityResult,
@@ -94,7 +95,6 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
 
       const { nextArchive, filmsAddedOrUpdated, listsAddedOrUpdated } =
         applyScrapeResultToWorkspace(result, archive);
-      onUpdateArchive(nextArchive);
 
       if (result.profile && onAddOrUpdateProfile) {
         const newProfile: ProfileAccount = {
@@ -110,6 +110,8 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
         };
         onAddOrUpdateProfile(newProfile, true);
       }
+
+      onUpdateArchive(nextArchive);
 
       setLastScrapeResult(result);
       setScrapeStatus({
@@ -207,21 +209,33 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
 
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text) as CineasteArchiveState;
-      if (!parsed || typeof parsed.films !== 'object') {
+      const rawParsed = JSON.parse(text);
+      const targetArchive: CineasteArchiveState | undefined =
+        rawParsed && typeof rawParsed.films === 'object'
+          ? (rawParsed as CineasteArchiveState)
+          : rawParsed?.archive && typeof rawParsed.archive.films === 'object'
+          ? (rawParsed.archive as CineasteArchiveState)
+          : undefined;
+
+      if (!targetArchive || typeof targetArchive.films !== 'object') {
         throw new Error('Invalid PMDB JSON backup structure');
       }
+
+      if (Array.isArray(rawParsed?.profiles) && rawParsed.profiles.length > 0 && onAddOrUpdateProfile) {
+        onAddOrUpdateProfile(rawParsed.profiles[0], true);
+      }
+
       onUpdateArchive({
-        films: parsed.films || {},
-        yearlyRankings: parsed.yearlyRankings || {},
-        oscarBallots: parsed.oscarBallots || {},
-        lists: Array.isArray(parsed.lists) ? parsed.lists : [],
+        films: targetArchive.films || {},
+        yearlyRankings: targetArchive.yearlyRankings || {},
+        oscarBallots: targetArchive.oscarBallots || {},
+        lists: Array.isArray(targetArchive.lists) ? targetArchive.lists : [],
         lastImportedAt: new Date().toISOString(),
       });
       setJsonSuccess(
-        `Restored ${Object.keys(parsed.films).length} films, ${
-          Object.keys(parsed.yearlyRankings || {}).length
-        } annual rankings, and ${Object.keys(parsed.oscarBallots || {}).length} Oscar ballots.`
+        `Restored ${Object.keys(targetArchive.films).length.toLocaleString()} films, ${
+          Object.keys(targetArchive.yearlyRankings || {}).length
+        } annual rankings, and ${Object.keys(targetArchive.oscarBallots || {}).length} Oscar ballots.`
       );
     } catch (err: any) {
       setJsonError(err?.message || 'Failed to parse JSON backup file.');
@@ -456,16 +470,21 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
             )}
 
             {scrapeProgress && (scrapeLoading || scrapeProgress.phase === 'complete') && (
-              <div className="p-3.5 bg-[#F2EFE9] dark:bg-[#18191E] border border-[#9A7B1C]/40 dark:border-[#D4AF37]/40 text-xs space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-medium text-[#9A7B1C] dark:text-[#D4AF37] flex items-center gap-1.5">
+              <div className="p-3.5 bg-[#F2EFE9] dark:bg-[#18191E] border border-[#9A7B1C]/40 dark:border-[#D4AF37]/40 text-xs space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     {scrapeLoading ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#9A7B1C] dark:text-[#D4AF37] shrink-0" />
                     ) : (
-                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[#15803D] dark:text-[#4ADE80] shrink-0" />
                     )}
-                    {scrapeProgress.message}
-                  </span>
+                    <span className="font-mono-tabular text-[11px] uppercase tracking-wider font-semibold text-[#9A7B1C] dark:text-[#D4AF37]">
+                      {scrapeProgress.phaseLabel} · {scrapeProgress.percentComplete}%
+                    </span>
+                    <span className="text-[#6E6A63] dark:text-[#9A9891] truncate">
+                      — {scrapeProgress.message}
+                    </span>
+                  </div>
                   {scrapeLoading && scrapeAbortRef.current && (
                     <button
                       type="button"
@@ -476,33 +495,51 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                     </button>
                   )}
                 </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono-tabular">
+
+                {/* Progress Bar */}
+                <div className="w-full h-2 bg-[#DED9CE] dark:bg-[#121316] overflow-hidden border border-[#DED9CE] dark:border-[#262830]">
+                  <div
+                    className="h-full bg-[#9A7B1C] dark:bg-[#D4AF37] transition-all duration-300"
+                    style={{ width: `${Math.max(4, scrapeProgress.percentComplete)}%` }}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono-tabular">
                   <div className="p-2 bg-[#FBF9F5] dark:bg-[#121316] border border-[#DED9CE] dark:border-[#262830]">
-                    <span className="text-[#6E6A63] dark:text-[#9A9891] block">
-                      Watched Films Crawled
+                    <span className="text-[#6E6A63] dark:text-[#9A9891] block text-[10px] uppercase">
+                      Current Page
                     </span>
                     <span className="font-semibold text-[#181615] dark:text-[#F4F1EA]">
-                      {scrapeProgress.filmsScraped.toLocaleString()}
-                      {scrapeProgress.expectedTotalFilms
-                        ? ` / ${scrapeProgress.expectedTotalFilms.toLocaleString()}`
-                        : ''}
-                    </span>{' '}
-                    <span className="opacity-70">
-                      (Page {scrapeProgress.currentFilmPage}/{scrapeProgress.totalFilmPages})
+                      Page {scrapeProgress.currentPage} of {scrapeProgress.totalPages}
                     </span>
                   </div>
                   <div className="p-2 bg-[#FBF9F5] dark:bg-[#121316] border border-[#DED9CE] dark:border-[#262830]">
-                    <span className="text-[#6E6A63] dark:text-[#9A9891] block">
-                      Curated Lists Crawled
+                    <span className="text-[#6E6A63] dark:text-[#9A9891] block text-[10px] uppercase">
+                      Items Discovered
+                    </span>
+                    <span className="font-semibold text-[#181615] dark:text-[#F4F1EA]">
+                      {scrapeProgress.totalItemsDiscovered.toLocaleString()} items
+                    </span>
+                  </div>
+                  <div className="p-2 bg-[#FBF9F5] dark:bg-[#121316] border border-[#DED9CE] dark:border-[#262830]">
+                    <span className="text-[#6E6A63] dark:text-[#9A9891] block text-[10px] uppercase">
+                      Films &amp; Lists
                     </span>
                     <span className="font-semibold text-[#9A7B1C] dark:text-[#D4AF37]">
-                      {scrapeProgress.listsScraped.toLocaleString()}
-                      {scrapeProgress.expectedTotalLists
-                        ? ` / ${scrapeProgress.expectedTotalLists.toLocaleString()}`
-                        : ''}
-                    </span>{' '}
-                    <span className="opacity-70">
-                      (Page {scrapeProgress.currentListPage}/{scrapeProgress.totalListPages})
+                      {scrapeProgress.filmsScraped.toLocaleString()}F ·{' '}
+                      {scrapeProgress.listsScraped.toLocaleString()}L
+                    </span>
+                  </div>
+                  <div className="p-2 bg-[#FBF9F5] dark:bg-[#121316] border border-[#DED9CE] dark:border-[#262830]">
+                    <span className="text-[#6E6A63] dark:text-[#9A9891] block text-[10px] uppercase">
+                      Estimated Time
+                    </span>
+                    <span className="font-semibold text-[#181615] dark:text-[#F4F1EA]">
+                      {formatScraperEta(
+                        scrapeProgress.estimatedRemainingMs,
+                        scrapeProgress.phase === 'complete',
+                        scrapeProgress.elapsedMs
+                      )}
                     </span>
                   </div>
                 </div>
@@ -532,6 +569,14 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                           : lastScrapeResult.list
                           ? ` · Added List "${lastScrapeResult.list.name}"`
                           : ''}
+                        {lastScrapeResult.paginationSummary?.gapAnalysis?.films && (
+                          <>
+                            {' · '}
+                            {lastScrapeResult.paginationSummary.gapAnalysis.films.verifiedComplete
+                              ? 'Gap-Analysis: 0 Missing Pages (100% Verified)'
+                              : `Gap-Analysis Recovered ${lastScrapeResult.paginationSummary.gapAnalysis.films.recoveredPages.length} pg`}
+                          </>
+                        )}
                       </p>
                     )}
                   </div>

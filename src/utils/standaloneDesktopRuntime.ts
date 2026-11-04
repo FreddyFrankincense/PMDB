@@ -566,10 +566,12 @@ async function handleStandaloneApiRequest(
     }
     const targetUrl = String(bodyObj?.url || url.searchParams.get('url') || '').trim();
     if (!targetUrl) return makeJsonResponse({ liveReachable: false, html: '' }, 400);
-    const html = await fetchLetterboxdViaBrowserProxy(targetUrl);
+    const { html, statusCode, retryAfterMs } = await fetchLetterboxdViaBrowserProxy(targetUrl);
     return makeJsonResponse({
       liveReachable: Boolean(html),
       html: html || '',
+      statusCode,
+      retryAfterMs,
     });
   }
 
@@ -636,7 +638,7 @@ async function handleStandaloneApiRequest(
     }
 
     if (detected.type === 'list' && detected.listSlug) {
-      const browserHtml = await fetchLetterboxdViaBrowserProxy(detected.normalizedUrl);
+      const { html: browserHtml } = await fetchLetterboxdViaBrowserProxy(detected.normalizedUrl);
       if (browserHtml) {
         const parsed = parseLetterboxdHtmlOrRssToResult(
           browserHtml,
@@ -694,7 +696,7 @@ async function handleStandaloneApiRequest(
 
     const rawUsername = detected.username || urlOrInput.replace(/^@/, '') || 'dave';
     const rssUrl = `https://letterboxd.com/${encodeURIComponent(rawUsername)}/rss/`;
-    const browserXml = await fetchLetterboxdViaBrowserProxy(rssUrl);
+    const { html: browserXml } = await fetchLetterboxdViaBrowserProxy(rssUrl);
     if (browserXml) {
       const parsed = parseLetterboxdHtmlOrRssToResult(browserXml, rssUrl, 'browser_fetch');
       if (parsed.films.length > 0) return makeJsonResponse(parsed);

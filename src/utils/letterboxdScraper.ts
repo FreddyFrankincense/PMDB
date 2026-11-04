@@ -34,8 +34,191 @@ export interface ScrapedListPayload {
   films: FilmEntry[];
 }
 
+export interface CrawlPageRange {
+  startPage: number;
+  endPage: number;
+}
+
+export interface CrawlGapAnalysisSummary {
+  targetTotalPages: number;
+  expectedTotalItems?: number;
+  actualUniqueItems: number;
+  itemShortfall: number;
+  initialMissingPages: number[];
+  initialMissingRanges: CrawlPageRange[];
+  initialMissingRangesLabel: string;
+  recoveredPages: number[];
+  remainingMissingPages: number[];
+  remainingMissingRangesLabel: string;
+  verifiedComplete: boolean;
+}
+
 export interface ScraperProgressUpdate {
-  phase: 'discovering' | 'films' | 'lists_index' | 'lists_expand' | 'complete';
+  phase:
+    | 'discovering'
+    | 'films'
+    | 'gap_analysis'
+    | 'lists_index'
+    | 'lists_expand'
+    | 'complete';
+  phaseLabel: string;
+  message: string;
+  currentPage: number;
+  totalPages: number;
+  overallPagesCompleted: number;
+  overallTotalPages: number;
+  percentComplete: number;
+  totalItemsDiscovered: number;
+  filmsScraped: number;
+  expectedTotalFilms?: number;
+  currentFilmPage: number;
+  totalFilmPages: number;
+  listsScraped: number;
+  expectedTotalLists?: number;
+  currentListPage: number;
+  totalListPages: number;
+  listsExpandedCount?: number;
+  totalListsToExpand?: number;
+  startedAtMs: number;
+  elapsedMs: number;
+  estimatedRemainingMs: number | null;
+  pagesPerSecond: number;
+  retryCount?: number;
+  lastBackoffDelayMs?: number;
+  gapAnalysisActive?: boolean;
+  missingPagesQueued?: number;
+  missingRangesLabel?: string;
+  gapPagesRecovered?: number;
+}
+
+export interface ScraperRetryConfig {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  jitterMs: number;
+  requestTimeoutMs: number;
+}
+
+export const DEFAULT_SCRAPER_RETRY_CONFIG: ScraperRetryConfig = {
+  maxRetries: 4,
+  baseDelayMs: 500,
+  maxDelayMs: 10000,
+  jitterMs: 300,
+  requestTimeoutMs: 8500,
+};
+
+/**
+ * Parses an HTTP `Retry-After` header (either integer seconds or HTTP-date) into milliseconds.
+ */
+export function parseRetryAfterHeaderMs(retryAfterHeader: string | null | undefined): number | null {
+  if (!retryAfterHeader) return null;
+  const trimmed = retryAfterHeader.trim();
+  if (!trimmed) return null;
+
+  const seconds = Number(trimmed);
+  if (!Number.isNaN(seconds) && seconds >= 0) {
+    return Math.min(Math.round(seconds * 1000), 30000);
+  }
+
+  const parsedDate = Date.parse(trimmed);
+  if (!Number.isNaN(parsedDate)) {
+    const deltaMs = parsedDate - Date.now();
+    return deltaMs > 0 ? Math.min(deltaMs, 30000) : 0;
+  }
+
+  return null;
+}
+
+/**
+ * Computes exponential backoff delay (`baseDelayMs * 2^attempt + jitter`),
+ * honoring any server-supplied `Retry-After` floor when HTTP 429 occurs.
+ */
+export function computeExponentialBackoffMs(
+  attempt: number,
+  config: Partial<ScraperRetryConfig> = {},
+  retryAfterMs?: number | null
+): number {
+  const baseDelayMs = config.baseDelayMs ?? DEFAULT_SCRAPER_RETRY_CONFIG.baseDelayMs;
+  const maxDelayMs = config.maxDelayMs ?? DEFAULT_SCRAPER_RETRY_CONFIG.maxDelayMs;
+  const jitterMs = config.jitterMs ?? DEFAULT_SCRAPER_RETRY_CONFIG.jitterMs;
+
+  const exponential = baseDelayMs * Math.pow(2, Math.max(0, attempt));
+  const jitter = jitterMs > 0 ? Math.floor(Math.random() * jitterMs) : 0;
+  const computed = Math.min(maxDelayMs, exponential + jitter);
+
+  if (typeof retryAfterMs === 'number' && retryAfterMs > 0) {
+    return Math.min(maxDelayMs * 2, Math.max(computed, retryAfterMs + jitter));
+  }
+
+  return computed;
+}
+
+/**
+ * Sleeps for `delayMs` milliseconds, resolving early if `abortSignal` fires.
+ */
+export function sleepWithAbort(delayMs: number, abortSignal?: AbortSignal): Promise<void> {
+  if (delayMs <= 0 || abortSignal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      abortSignal?.removeEventListener('abort', onAbort);
+    };
+    abortSignal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Returns true if an HTTP status code is transient and should be retried with exponential backoff
+ * (e.g., 429 Too Many Requests, 408 Request Timeout, or 5xx Gateway/Cloudflare errors).
+ */
+export function isRetryableHttpStatus(status: number): boolean {
+  return (
+    status === 429 ||
+    status === 408 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    status === 520 ||
+    status === 522 ||
+    status === 524
+  );
+}
+
+export function formatScraperEta(
+  estimatedRemainingMs: number | null,
+  isComplete = false,
+  elapsedMs = 0
+): string {
+  if (isComplete) {
+    return `Finished in ${(Math.max(100, elapsedMs) / 1000).toFixed(1)}s`;
+  }
+  if (estimatedRemainingMs === null || estimatedRemainingMs < 0) {
+    return 'Calculating ETA...';
+  }
+  if (estimatedRemainingMs === 0) {
+    return '< 1s remaining';
+  }
+  const totalSec = Math.ceil(estimatedRemainingMs / 1000);
+  if (totalSec < 60) {
+    return `~${totalSec}s remaining`;
+  }
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  return `~${mins}m ${secs}s remaining`;
+}
+
+function buildScraperProgress(opts: {
+  phase: ScraperProgressUpdate['phase'];
+  phaseLabel: string;
   message: string;
   filmsScraped: number;
   expectedTotalFilms?: number;
@@ -45,6 +228,219 @@ export interface ScraperProgressUpdate {
   expectedTotalLists?: number;
   currentListPage: number;
   totalListPages: number;
+  listsExpandedCount?: number;
+  totalListsToExpand?: number;
+  startedAtMs: number;
+  retryCount?: number;
+  lastBackoffDelayMs?: number;
+  gapAnalysisActive?: boolean;
+  missingPagesQueued?: number;
+  missingRangesLabel?: string;
+  gapPagesRecovered?: number;
+}): ScraperProgressUpdate {
+  const elapsedMs = Math.max(50, Date.now() - opts.startedAtMs);
+  const listsExpanded = opts.listsExpandedCount ?? 0;
+  const listsToExpand = opts.totalListsToExpand ?? 0;
+
+  const overallPagesCompleted =
+    opts.currentFilmPage + opts.currentListPage + listsExpanded;
+  const overallTotalPages = Math.max(
+    1,
+    opts.totalFilmPages + opts.totalListPages + listsToExpand
+  );
+
+  const percentComplete =
+    opts.phase === 'complete'
+      ? 100
+      : opts.phase === 'discovering'
+      ? 4
+      : Math.min(
+          99,
+          Math.max(5, Math.round((overallPagesCompleted / overallTotalPages) * 100))
+        );
+
+  const pagesPerSecond =
+    overallPagesCompleted > 0
+      ? Number((overallPagesCompleted / (elapsedMs / 1000)).toFixed(1))
+      : 0;
+
+  const remainingPages = Math.max(0, overallTotalPages - overallPagesCompleted);
+  const estimatedRemainingMs =
+    opts.phase === 'complete'
+      ? 0
+      : overallPagesCompleted <= 0
+      ? null
+      : Math.round((elapsedMs / overallPagesCompleted) * remainingPages);
+
+  let currentPage = overallPagesCompleted;
+  let totalPages = overallTotalPages;
+  if (opts.phase === 'films' || opts.phase === 'gap_analysis') {
+    currentPage = opts.currentFilmPage;
+    totalPages = opts.totalFilmPages;
+  } else if (opts.phase === 'lists_index') {
+    currentPage = opts.currentListPage;
+    totalPages = opts.totalListPages;
+  } else if (opts.phase === 'lists_expand') {
+    currentPage = listsExpanded > 0 ? listsExpanded : opts.currentListPage;
+    totalPages = listsToExpand > 0 ? listsToExpand : opts.totalListPages;
+  } else if (opts.phase === 'discovering') {
+    currentPage = 1;
+    totalPages = 1;
+  }
+
+  return {
+    phase: opts.phase,
+    phaseLabel: opts.phaseLabel,
+    message: opts.message,
+    currentPage,
+    totalPages: Math.max(1, totalPages),
+    overallPagesCompleted,
+    overallTotalPages,
+    percentComplete,
+    totalItemsDiscovered: opts.filmsScraped + opts.listsScraped,
+    filmsScraped: opts.filmsScraped,
+    expectedTotalFilms: opts.expectedTotalFilms,
+    currentFilmPage: opts.currentFilmPage,
+    totalFilmPages: opts.totalFilmPages,
+    listsScraped: opts.listsScraped,
+    expectedTotalLists: opts.expectedTotalLists,
+    currentListPage: opts.currentListPage,
+    totalListPages: opts.totalListPages,
+    listsExpandedCount: opts.listsExpandedCount,
+    totalListsToExpand: opts.totalListsToExpand,
+    startedAtMs: opts.startedAtMs,
+    elapsedMs,
+    estimatedRemainingMs,
+    pagesPerSecond,
+    retryCount: opts.retryCount,
+    lastBackoffDelayMs: opts.lastBackoffDelayMs,
+    gapAnalysisActive: opts.gapAnalysisActive,
+    missingPagesQueued: opts.missingPagesQueued,
+    missingRangesLabel: opts.missingRangesLabel,
+    gapPagesRecovered: opts.gapPagesRecovered,
+  };
+}
+
+/**
+ * Compresses a sorted array of page numbers (e.g. [3, 4, 5, 12, 19, 20])
+ * into contiguous `{ startPage, endPage }` range objects.
+ */
+export function groupPagesIntoRanges(pages: number[]): CrawlPageRange[] {
+  const uniqueSorted = Array.from(new Set(pages.filter((p) => p >= 1))).sort(
+    (a, b) => a - b
+  );
+  if (uniqueSorted.length === 0) return [];
+
+  const ranges: CrawlPageRange[] = [];
+  let start = uniqueSorted[0];
+  let prev = uniqueSorted[0];
+
+  for (let i = 1; i < uniqueSorted.length; i++) {
+    const curr = uniqueSorted[i];
+    if (curr === prev + 1) {
+      prev = curr;
+    } else {
+      ranges.push({ startPage: start, endPage: prev });
+      start = curr;
+      prev = curr;
+    }
+  }
+  ranges.push({ startPage: start, endPage: prev });
+  return ranges;
+}
+
+/**
+ * Formats an array of page numbers into a compact archival range string
+ * (e.g. "p.3–5, p.12, p.84" or "0 gaps").
+ */
+export function formatPageRangesCompact(pages: number[], maxSegments = 6): string {
+  const ranges = groupPagesIntoRanges(pages);
+  if (ranges.length === 0) return '0 gaps';
+  const formatted = ranges.map((r) =>
+    r.startPage === r.endPage ? `p.${r.startPage}` : `p.${r.startPage}–${r.endPage}`
+  );
+  if (formatted.length <= maxSegments) {
+    return formatted.join(', ');
+  }
+  return `${formatted.slice(0, maxSegments).join(', ')} (+${
+    formatted.length - maxSegments
+  } more)`;
+}
+
+/**
+ * Intelligently analyzes post-crawl item totals and per-page item counts to identify
+ * any missing or under-populated pages across a multi-page crawl (e.g., 6,024 films across 84 pages).
+ * Returns only the missing/incomplete page numbers and contiguous page ranges so the scraper
+ * queues strictly the missing pages without re-fetching intact pages.
+ */
+export function analyzeCrawlPageGaps(params: {
+  discoveredMaxPage: number;
+  expectedTotalItems?: number;
+  itemsPerPage: number;
+  maxAllowedPages?: number;
+  actualUniqueItems: number;
+  pageItemCounts: Map<number, number>;
+}): {
+  targetTotalPages: number;
+  missingPages: number[];
+  missingRanges: CrawlPageRange[];
+  missingRangesLabel: string;
+  itemShortfall: number;
+} {
+  const maxCap = params.maxAllowedPages ?? 2000;
+  const computedPagesFromTotal =
+    params.expectedTotalItems && params.expectedTotalItems > 0
+      ? Math.ceil(params.expectedTotalItems / params.itemsPerPage)
+      : 1;
+
+  const targetTotalPages = Math.min(
+    Math.max(1, params.discoveredMaxPage, computedPagesFromTotal),
+    maxCap
+  );
+
+  const itemShortfall =
+    typeof params.expectedTotalItems === 'number' && params.expectedTotalItems > 0
+      ? Math.max(0, params.expectedTotalItems - params.actualUniqueItems)
+      : 0;
+
+  const missingPages: number[] = [];
+
+  for (let pageNum = 1; pageNum <= targetTotalPages; pageNum++) {
+    const countOnPage = params.pageItemCounts.get(pageNum) ?? 0;
+
+    // 1. Page was never fetched or yielded 0 items
+    if (countOnPage === 0) {
+      missingPages.push(pageNum);
+      continue;
+    }
+
+    // 2. If overall collection has a shortfall vs expectedTotalItems, inspect interior and tail pages for partial truncation
+    if (itemShortfall > 0) {
+      if (pageNum < targetTotalPages && countOnPage < params.itemsPerPage) {
+        missingPages.push(pageNum);
+      } else if (
+        pageNum === targetTotalPages &&
+        typeof params.expectedTotalItems === 'number'
+      ) {
+        const expectedOnLastPage =
+          params.expectedTotalItems - (targetTotalPages - 1) * params.itemsPerPage;
+        if (expectedOnLastPage > 0 && countOnPage < expectedOnLastPage) {
+          missingPages.push(pageNum);
+        }
+      }
+    }
+  }
+
+  const missingRanges = groupPagesIntoRanges(missingPages);
+  const missingRangesLabel = formatPageRangesCompact(missingPages);
+
+  return {
+    targetTotalPages,
+    missingPages,
+    missingRanges,
+    missingRangesLabel,
+    itemShortfall,
+  };
 }
 
 export interface ScrapeUtilityResult {
@@ -71,6 +467,10 @@ export interface ScrapeUtilityResult {
     listPagesCrawled: number;
     totalListPages: number;
     expectedTotalLists?: number;
+    gapAnalysis?: {
+      films: CrawlGapAnalysisSummary;
+      lists?: CrawlGapAnalysisSummary;
+    };
   };
 }
 
@@ -269,15 +669,17 @@ export function extractPaginationMetadata(rawContent: string): PaginationMetadat
     }
   }
 
-  // 2. Extract expected total films if present on profile header or films page header
+  // 2. Extract expected total films if present on profile header, meta description, list header, or films page header
   let expectedTotalFilms: number | undefined;
   const profileFilmsStatMatch =
     rawContent.match(
       /href=["']\/[^/"']+\/films\/["'][^>]*>\s*<span[^>]*class=["'][^"']*value[^"']*["'][^>]*>([\d,]+)<\/span>\s*<span[^>]*class=["'][^"']*definition[^"']*["'][^>]*>Films<\/span>/i
     ) ||
-    rawContent.match(/([\d,]+)\s+films?\s+watched/i) ||
-    rawContent.match(/there\s+are\s+([\d,]+)\s+films?/i) ||
-    rawContent.match(/class=["'][^"']*ui-block-heading[^"']*["'][^>]*>[^<]*?([\d,]+)\s+films?/i);
+    rawContent.match(/([\d,]+)(?:\s|&nbsp;)+films?\s+watched/i) ||
+    rawContent.match(/there\s+are\s+([\d,]+)(?:\s|&nbsp;)+films?/i) ||
+    rawContent.match(/A\s+list\s+of\s+([\d,]+)(?:\s|&nbsp;)+films?/i) ||
+    rawContent.match(/class=["'][^"']*ui-block-heading[^"']*["'][^>]*>[^<]*?([\d,]+)(?:\s|&nbsp;)+films?/i) ||
+    rawContent.match(/title=["']([\d,]+)(?:\s|&nbsp;)+films?["']/i);
 
   if (profileFilmsStatMatch?.[1]) {
     const parsed = parseInt(profileFilmsStatMatch[1].replace(/,/g, ''), 10);
@@ -292,8 +694,9 @@ export function extractPaginationMetadata(rawContent: string): PaginationMetadat
     rawContent.match(
       /href=["']\/[^/"']+\/lists\/["'][^>]*>\s*<span[^>]*class=["'][^"']*value[^"']*["'][^>]*>([\d,]+)<\/span>\s*<span[^>]*class=["'][^"']*definition[^"']*["'][^>]*>Lists<\/span>/i
     ) ||
-    rawContent.match(/You\s+have\s+([\d,]+)\s+lists?/i) ||
-    rawContent.match(/([\d,]+)\s+lists?\s+published/i);
+    rawContent.match(/You\s+have\s+([\d,]+)(?:\s|&nbsp;)+lists?/i) ||
+    rawContent.match(/([\d,]+)(?:\s|&nbsp;)+lists?\s+published/i) ||
+    rawContent.match(/title=["']([\d,]+)(?:\s|&nbsp;)+lists?["']/i);
 
   if (profileListsStatMatch?.[1]) {
     const parsed = parseInt(profileListsStatMatch[1].replace(/,/g, ''), 10);
@@ -406,7 +809,7 @@ export function parseLetterboxdListsIndexHtml(
     const block = secMatch[1];
     const titleLinkMatch =
       block.match(
-        /<h[23][^>]*class=["'][^"']*title[^"']*["'][^>]*>\s*<a[^>]+href=["']([^"']*\/list\/[^/"']+\/?)["'][^>]*>([\s\S]*?)<\/a>/i
+        /<h[1234][^>]*>\s*<a[^>]+href=["']([^"']*\/list\/[^/"']+\/?)["'][^>]*>([\s\S]*?)<\/a>/i
       ) ||
       block.match(
         /<a[^>]+href=["']([^"']*\/list\/[^/"']+\/?)["'][^>]*class=["'][^"']*list-title[^"']*["'][^>]*>([\s\S]*?)<\/a>/i
@@ -425,8 +828,9 @@ export function parseLetterboxdListsIndexHtml(
     seenListUrls.add(normUrl.toLowerCase());
 
     const countMatch =
-      block.match(/<small[^>]*class=["'][^"']*value[^"']*["'][^>]*>\s*([\d,]+)\s*films?/i) ||
-      block.match(/\b([\d,]+)\s+films?\b/i);
+      block.match(
+        /<(?:small|span)[^>]*class=["'][^"']*value[^"']*["'][^>]*>\s*([\d,]+)(?:\s|&nbsp;|&#160;)*films?/i
+      ) || block.match(/\b([\d,]+)(?:\s|&nbsp;|&#160;)+films?\b/i);
     const expectedFilmCount = countMatch?.[1]
       ? parseInt(countMatch[1].replace(/,/g, ''), 10)
       : undefined;
@@ -561,8 +965,9 @@ export function parseLetterboxdHtmlOrRssToResult(
       : `${cleanTitle.toLowerCase()}::${year}`;
     const fallbackTitleYearKey = `${cleanTitle.toLowerCase()}::${year}`;
 
-    const existing =
-      filmsByKey.get(dedupKey) || filmsByKey.get(fallbackTitleYearKey);
+    const existing = explicitSlug
+      ? filmsByKey.get(dedupKey)
+      : filmsByKey.get(dedupKey) || filmsByKey.get(fallbackTitleYearKey);
     if (existing) {
       // Upgrade existing entry if the new observation has richer metadata (e.g. rating, review, poster)
       if (existing.rating === null && opts.rating !== null) {
@@ -972,55 +1377,57 @@ export function parseLetterboxdHtmlOrRssToResult(
     });
   }
 
-  // 5. Fallback scan for any standalone Poster Containers (data-item-name / data-item-slug / data-film-slug)
-  const standalonePosterRegex =
-    /<div[^>]+(?:data-item-(?:full-display-)?name|data-film-name|data-item-slug|data-film-slug)=[^>]+>([\s\S]{0,500}?)(?=<div[^>]+data-|<\/li>|$)/gi;
-  let spMatch: RegExpExecArray | null;
-  while ((spMatch = standalonePosterRegex.exec(rawContent)) !== null) {
-    const chunk = spMatch[0];
-    const filmSlug =
-      chunk.match(/data-(?:item|film)-slug=["']([^"']+)["']/i)?.[1] ||
-      chunk.match(/data-(?:item|target)-link=["']\/film\/([^/"']+)\/?["']/i)?.[1];
-    const rawName =
-      chunk.match(/data-item-full-display-name=["']([^"']+)["']/i)?.[1] ||
-      chunk.match(/data-item-name=["']([^"']+)["']/i)?.[1] ||
-      chunk.match(/data-film-name=["']([^"']+)["']/i)?.[1];
+  // 5. Fallback scan for standalone Poster Containers only if no <li> grid items were matched above
+  if (films.length === 0) {
+    const standalonePosterRegex =
+      /<div[^>]+(?:data-item-(?:full-display-)?name|data-film-name|data-item-slug|data-film-slug)=[^>]+>([\s\S]{0,500}?)(?=<div[^>]+data-|<\/li>|$)/gi;
+    let spMatch: RegExpExecArray | null;
+    while ((spMatch = standalonePosterRegex.exec(rawContent)) !== null) {
+      const chunk = spMatch[0];
+      const filmSlug =
+        chunk.match(/data-(?:item|film)-slug=["']([^"']+)["']/i)?.[1] ||
+        chunk.match(/data-(?:item|target)-link=["']\/film\/([^/"']+)\/?["']/i)?.[1];
+      const rawName =
+        chunk.match(/data-item-full-display-name=["']([^"']+)["']/i)?.[1] ||
+        chunk.match(/data-item-name=["']([^"']+)["']/i)?.[1] ||
+        chunk.match(/data-film-name=["']([^"']+)["']/i)?.[1];
 
-    if (!filmSlug && !rawName) continue;
+      if (!filmSlug && !rawName) continue;
 
-    let title = rawName ? decodeHtmlEntities(rawName.trim()) : '';
-    let releaseYear = 2024;
-    const parenMatch = title.match(/^(.*?)\s*\((\d{4})\)$/);
-    if (parenMatch) {
-      title = parenMatch[1].trim();
-      releaseYear = parseInt(parenMatch[2], 10);
-    } else {
-      const explicitYear = chunk.match(/data-film-release-year=["'](\d{4})["']/i)?.[1];
-      if (explicitYear) {
-        releaseYear = parseInt(explicitYear, 10);
+      let title = rawName ? decodeHtmlEntities(rawName.trim()) : '';
+      let releaseYear = 2024;
+      const parenMatch = title.match(/^(.*?)\s*\((\d{4})\)$/);
+      if (parenMatch) {
+        title = parenMatch[1].trim();
+        releaseYear = parseInt(parenMatch[2], 10);
+      } else {
+        const explicitYear = chunk.match(/data-film-release-year=["'](\d{4})["']/i)?.[1];
+        if (explicitYear) {
+          releaseYear = parseInt(explicitYear, 10);
+        }
       }
+
+      const ratedClassMatch = chunk.match(/rated-(\d{1,2})\b/i);
+      const rating = ratedClassMatch
+        ? parseInt(ratedClassMatch[1], 10) / 2
+        : isWatchlistPage
+        ? null
+        : null;
+      const liked = /icon-liked/i.test(chunk) || (rating !== null && rating >= 4.5);
+
+      pushFilmEntry({
+        title,
+        releaseYear,
+        filmSlug,
+        rating,
+        liked,
+        rewatch: false,
+        watchlist: isWatchlistPage,
+        watchedDate: isWatchlistPage ? null : new Date().toISOString().slice(0, 10),
+        notes: 'Logged via external profile view.',
+        sourceTag: 'html-scrape',
+      });
     }
-
-    const ratedClassMatch = chunk.match(/rated-(\d{1,2})\b/i);
-    const rating = ratedClassMatch
-      ? parseInt(ratedClassMatch[1], 10) / 2
-      : isWatchlistPage
-      ? null
-      : null;
-    const liked = /icon-liked/i.test(chunk) || (rating !== null && rating >= 4.5);
-
-    pushFilmEntry({
-      title,
-      releaseYear,
-      filmSlug,
-      rating,
-      liked,
-      rewatch: false,
-      watchlist: isWatchlistPage,
-      watchedDate: isWatchlistPage ? null : new Date().toISOString().slice(0, 10),
-      notes: 'Logged via external profile view.',
-      sourceTag: 'html-scrape',
-    });
   }
 
   // 6. Parse OpenGraph <meta property="og:title" content="Parasite (2019)"/> if on a single film page
@@ -1164,25 +1571,70 @@ export function parseLetterboxdHtmlOrRssToResult(
 }
 
 /**
+ * Executes a `fetch` request with an explicit per-attempt timeout combined with an optional caller `AbortSignal`.
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = DEFAULT_SCRAPER_RETRY_CONFIG.requestTimeoutMs,
+  callerAbortSignal?: AbortSignal
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('Request timeout')), timeoutMs);
+  const onCallerAbort = () => controller.abort(new Error('Aborted by user'));
+  callerAbortSignal?.addEventListener('abort', onCallerAbort, { once: true });
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+    callerAbortSignal?.removeEventListener('abort', onCallerAbort);
+  }
+}
+
+/**
  * Browser-side fetch fallback using multiple public CORS proxies (both JSON-wrapped and raw)
- * to parse Letterboxd pages directly from the client browser when needed.
+ * with per-request timeout and HTTP 429 rate-limit detection.
  */
 export async function fetchLetterboxdViaBrowserProxy(
-  targetUrl: string
-): Promise<string | null> {
+  targetUrl: string,
+  options?: {
+    timeoutMs?: number;
+    abortSignal?: AbortSignal;
+  }
+): Promise<{ html: string | null; statusCode?: number; retryAfterMs?: number | null }> {
+  const timeoutMs = options?.timeoutMs ?? 7000;
+  let lastStatus: number | undefined;
+  let maxRetryAfterMs: number | null = null;
+
+  const isValidBody = (text: string) =>
+    Boolean(
+      text &&
+        text.length > 200 &&
+        !/Just a moment\.\.\.|cf-mitigated|<title>Access denied|^Rate limit exceeded/i.test(text)
+    );
+
   // 1. Try JSON-wrapped allorigins (/get) first because it never suffers from upstream header stripping
   try {
+    if (options?.abortSignal?.aborted) return { html: null };
     const jsonRelay = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-    const res = await fetch(jsonRelay);
+    const res = await fetchWithTimeout(jsonRelay, {}, timeoutMs, options?.abortSignal);
+    lastStatus = res.status;
+    if (res.status === 429) {
+      maxRetryAfterMs = parseRetryAfterHeaderMs(res.headers.get('Retry-After')) ?? 1500;
+    }
     if (res.ok) {
       const data = await res.json();
+      const httpCode = Number(data?.status?.http_code || 200);
+      if (httpCode === 429) {
+        lastStatus = 429;
+      }
       const contents = typeof data?.contents === 'string' ? data.contents : '';
-      if (
-        contents &&
-        contents.length > 200 &&
-        !/Just a moment\.\.\.|cf-mitigated|<title>Access denied/i.test(contents)
-      ) {
-        return contents;
+      if (isValidBody(contents)) {
+        return { html: contents, statusCode: 200 };
       }
     }
   } catch {
@@ -1196,64 +1648,166 @@ export async function fetchLetterboxdViaBrowserProxy(
   ];
 
   for (const relayUrl of relays) {
+    if (options?.abortSignal?.aborted) break;
     try {
-      const res = await fetch(relayUrl);
+      const res = await fetchWithTimeout(relayUrl, {}, timeoutMs, options?.abortSignal);
+      lastStatus = res.status;
+      if (res.status === 429) {
+        const parsedRa = parseRetryAfterHeaderMs(res.headers.get('Retry-After'));
+        if (parsedRa !== null) maxRetryAfterMs = Math.max(maxRetryAfterMs ?? 0, parsedRa);
+      }
       if (res.ok) {
         const text = await res.text();
-        if (
-          text &&
-          text.length > 200 &&
-          !/Just a moment\.\.\.|cf-mitigated|<title>Access denied/i.test(text)
-        ) {
-          return text;
+        if (isValidBody(text)) {
+          return { html: text, statusCode: 200 };
+        }
+        if (/Rate limit exceeded/i.test(text)) {
+          lastStatus = 429;
         }
       }
     } catch {
       // Continue to next relay
     }
   }
-  return null;
+  return { html: null, statusCode: lastStatus, retryAfterMs: maxRetryAfterMs };
 }
 
 /**
- * Fetches a single Letterboxd URL using the hybrid Server Relay + Browser Proxy pool.
+ * Fetches a single Letterboxd URL using the hybrid Server Relay + Browser Proxy pool,
+ * equipped with exponential backoff + full jitter and `Retry-After` support for transient
+ * HTTP 429 (Too Many Requests), 5xx gateway errors, and network timeouts.
  */
 export async function fetchLetterboxdPageHybrid(
   targetUrl: string,
-  preferBrowserFetch = false
-): Promise<string | null> {
-  if (preferBrowserFetch) {
-    const browserHtml = await fetchLetterboxdViaBrowserProxy(targetUrl);
-    if (browserHtml) return browserHtml;
+  preferBrowserFetch = false,
+  retryOptions?: {
+    maxRetries?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    requestTimeoutMs?: number;
+    abortSignal?: AbortSignal;
+    onRetry?: (info: {
+      attempt: number;
+      maxRetries: number;
+      delayMs: number;
+      reason: string;
+      url: string;
+    }) => void;
   }
+): Promise<string | null> {
+  const maxRetries = retryOptions?.maxRetries ?? DEFAULT_SCRAPER_RETRY_CONFIG.maxRetries;
+  const baseDelayMs = retryOptions?.baseDelayMs ?? DEFAULT_SCRAPER_RETRY_CONFIG.baseDelayMs;
+  const maxDelayMs = retryOptions?.maxDelayMs ?? DEFAULT_SCRAPER_RETRY_CONFIG.maxDelayMs;
+  const requestTimeoutMs =
+    retryOptions?.requestTimeoutMs ?? DEFAULT_SCRAPER_RETRY_CONFIG.requestTimeoutMs;
+  const abortSignal = retryOptions?.abortSignal;
 
-  try {
-    const res = await fetch('/api/letterboxd/scrape-page', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: targetUrl }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as {
-        liveReachable?: boolean;
-        html?: string;
-      };
-      if (
-        data?.liveReachable &&
-        data.html &&
-        data.html.length > 200 &&
-        !/Just a moment\.\.\.|cf-mitigated/i.test(data.html)
-      ) {
-        return data.html;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (abortSignal?.aborted) return null;
+
+    let observedStatus: number | undefined;
+    let observedRetryAfterMs: number | null = null;
+    let failureReason = 'Transient network timeout';
+
+    if (preferBrowserFetch) {
+      const browserRes = await fetchLetterboxdViaBrowserProxy(targetUrl, {
+        timeoutMs: requestTimeoutMs,
+        abortSignal,
+      });
+      if (browserRes.html) return browserRes.html;
+      if (browserRes.statusCode) observedStatus = browserRes.statusCode;
+      if (browserRes.retryAfterMs) observedRetryAfterMs = browserRes.retryAfterMs;
+    }
+
+    try {
+      const res = await fetchWithTimeout(
+        '/api/letterboxd/scrape-page',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: targetUrl }),
+        },
+        requestTimeoutMs,
+        abortSignal
+      );
+
+      observedStatus = res.status;
+      const headerRetryAfter = parseRetryAfterHeaderMs(res.headers.get('Retry-After'));
+      if (headerRetryAfter !== null) {
+        observedRetryAfterMs = headerRetryAfter;
+      }
+
+      if (res.ok) {
+        const data = (await res.json()) as {
+          liveReachable?: boolean;
+          html?: string;
+          statusCode?: number;
+          retryAfterMs?: number | null;
+        };
+        if (
+          data?.liveReachable &&
+          data.html &&
+          data.html.length > 200 &&
+          !/Just a moment\.\.\.|cf-mitigated/i.test(data.html)
+        ) {
+          return data.html;
+        }
+        if (data?.statusCode) {
+          observedStatus = data.statusCode;
+        }
+        if (typeof data?.retryAfterMs === 'number') {
+          observedRetryAfterMs = data.retryAfterMs;
+        }
+      }
+
+      if (observedStatus === 429) {
+        failureReason = 'HTTP 429 Too Many Requests';
+      } else if (observedStatus && isRetryableHttpStatus(observedStatus)) {
+        failureReason = `HTTP ${observedStatus} gateway response`;
+      }
+    } catch (err: any) {
+      if (abortSignal?.aborted) return null;
+      failureReason =
+        err?.name === 'AbortError' || /timeout/i.test(String(err?.message || ''))
+          ? `Request timed out after ${requestTimeoutMs}ms`
+          : 'Network error during page fetch';
+    }
+
+    if (!preferBrowserFetch && !abortSignal?.aborted) {
+      const browserRes = await fetchLetterboxdViaBrowserProxy(targetUrl, {
+        timeoutMs: requestTimeoutMs,
+        abortSignal,
+      });
+      if (browserRes.html) return browserRes.html;
+      if (browserRes.statusCode === 429) {
+        observedStatus = 429;
+        failureReason = 'HTTP 429 Too Many Requests';
+      }
+      if (browserRes.retryAfterMs) {
+        observedRetryAfterMs = Math.max(observedRetryAfterMs ?? 0, browserRes.retryAfterMs);
       }
     }
-  } catch {
-    // Fallback to browser relay below
-  }
 
-  if (!preferBrowserFetch) {
-    const browserHtml = await fetchLetterboxdViaBrowserProxy(targetUrl);
-    if (browserHtml) return browserHtml;
+    // Do not retry permanent 404 Not Found
+    if (observedStatus === 404) {
+      return null;
+    }
+
+    if (attempt < maxRetries && !abortSignal?.aborted) {
+      const delayMs = computeExponentialBackoffMs(
+        attempt,
+        { baseDelayMs, maxDelayMs },
+        observedRetryAfterMs
+      );
+      retryOptions?.onRetry?.({
+        attempt: attempt + 1,
+        maxRetries,
+        delayMs,
+        reason: failureReason,
+        url: targetUrl,
+      });
+      await sleepWithAbort(delayMs, abortSignal);
+    }
   }
 
   return null;
@@ -1271,10 +1825,35 @@ export async function crawlPaginatedLetterboxdList(
     abortSignal?: AbortSignal;
   }
 ): Promise<ScrapeUtilityResult | null> {
+  const startedAtMs = Date.now();
   const detected = detectLetterboxdUrlType(listUrl);
   const baseUrl = detected.normalizedUrl.replace(/\/page\/\d+\/?$/i, '/');
+  let totalRetriesCount = 0;
+  let lastBackoffDelayMs: number | undefined;
 
-  const page1Html = await fetchLetterboxdPageHybrid(baseUrl, options?.preferBrowserFetch);
+  options?.onProgress?.(
+    buildScraperProgress({
+      phase: 'discovering',
+      phaseLabel: 'Discovering Curated List Pages',
+      message: `Inspecting pagination bounds for ${baseUrl}...`,
+      filmsScraped: 0,
+      currentFilmPage: 0,
+      totalFilmPages: 1,
+      listsScraped: 0,
+      currentListPage: 0,
+      totalListPages: 1,
+      startedAtMs,
+      retryCount: 0,
+    })
+  );
+
+  const page1Html = await fetchLetterboxdPageHybrid(baseUrl, options?.preferBrowserFetch, {
+    abortSignal: options?.abortSignal,
+    onRetry: (info) => {
+      totalRetriesCount++;
+      lastBackoffDelayMs = info.delayMs;
+    },
+  });
   if (!page1Html) return null;
 
   const page1Parsed = parseLetterboxdHtmlOrRssToResult(
@@ -1283,47 +1862,119 @@ export async function crawlPaginatedLetterboxdList(
     'paginated_crawl'
   );
   const pageMeta = extractPaginationMetadata(page1Html);
-  const totalPages = Math.min(Math.max(1, pageMeta.maxPage), 100);
+  let expectedListFilms =
+    pageMeta.expectedTotalFilms || page1Parsed.list?.expectedFilmCount;
+  const computedPagesFromCount = expectedListFilms
+    ? Math.ceil(expectedListFilms / 100)
+    : 1;
+  let totalPages = Math.min(
+    Math.max(1, pageMeta.maxPage, computedPagesFromCount),
+    100
+  );
 
   const allFilmsMap = new Map<string, FilmEntry>();
+  const listPageItemCounts = new Map<number, number>();
+  listPageItemCounts.set(1, page1Parsed.films.length);
+
   for (const f of page1Parsed.films) {
     allFilmsMap.set(`slug::${f.slug.toLowerCase()}`, f);
   }
 
-  options?.onProgress?.({
-    phase: 'lists_expand',
-    message: `Scraped List Page 1 / ${totalPages} (${allFilmsMap.size} films)...`,
-    filmsScraped: allFilmsMap.size,
-    currentFilmPage: 1,
-    totalFilmPages: totalPages,
-    listsScraped: 1,
-    currentListPage: 1,
-    totalListPages: totalPages,
-  });
+  options?.onProgress?.(
+    buildScraperProgress({
+      phase: 'lists_expand',
+      phaseLabel: 'Crawling Curated List Pages',
+      message: `Scraped List Page 1 of ${totalPages} (${allFilmsMap.size.toLocaleString()} films discovered)...`,
+      filmsScraped: allFilmsMap.size,
+      expectedTotalFilms: expectedListFilms,
+      currentFilmPage: 1,
+      totalFilmPages: totalPages,
+      listsScraped: 1,
+      expectedTotalLists: 1,
+      currentListPage: 1,
+      totalListPages: totalPages,
+      startedAtMs,
+      retryCount: totalRetriesCount,
+      lastBackoffDelayMs,
+    })
+  );
+
+  let pagesCompleted = 1;
 
   if (totalPages > 1) {
-    const remainingPages = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+    let nextPageCursor = 2;
     const BATCH_SIZE = 4;
 
-    for (let i = 0; i < remainingPages.length; i += BATCH_SIZE) {
+    while (nextPageCursor <= totalPages) {
       if (options?.abortSignal?.aborted) break;
-      const batch = remainingPages.slice(i, i + BATCH_SIZE);
+      const batch: number[] = [];
+      for (
+        let p = nextPageCursor;
+        p < nextPageCursor + BATCH_SIZE && p <= totalPages;
+        p++
+      ) {
+        batch.push(p);
+      }
+      nextPageCursor += batch.length;
+
       const batchHtmls = await Promise.all(
         batch.map((pageNum) =>
           fetchLetterboxdPageHybrid(
             `${baseUrl}page/${pageNum}/`,
-            options?.preferBrowserFetch
+            options?.preferBrowserFetch,
+            {
+              abortSignal: options?.abortSignal,
+              onRetry: (info) => {
+                totalRetriesCount++;
+                lastBackoffDelayMs = info.delayMs;
+                options?.onProgress?.(
+                  buildScraperProgress({
+                    phase: 'lists_expand',
+                    phaseLabel: 'Exponential Backoff Retry',
+                    message: `${info.reason} on list page ${pageNum} — retry ${info.attempt}/${info.maxRetries} in ${(info.delayMs / 1000).toFixed(1)}s...`,
+                    filmsScraped: allFilmsMap.size,
+                    expectedTotalFilms: expectedListFilms,
+                    currentFilmPage: pagesCompleted,
+                    totalFilmPages: totalPages,
+                    listsScraped: 1,
+                    expectedTotalLists: 1,
+                    currentListPage: pagesCompleted,
+                    totalListPages: totalPages,
+                    startedAtMs,
+                    retryCount: totalRetriesCount,
+                    lastBackoffDelayMs: info.delayMs,
+                  })
+                );
+              },
+            }
           )
         )
       );
 
-      for (const html of batchHtmls) {
+      for (let idx = 0; idx < batchHtmls.length; idx++) {
+        const html = batchHtmls[idx];
+        const pageNum = batch[idx];
         if (!html) continue;
+        pagesCompleted++;
+
+        const subMeta = extractPaginationMetadata(html);
+        if (subMeta.expectedTotalFilms && !expectedListFilms) {
+          expectedListFilms = subMeta.expectedTotalFilms;
+        }
+        const newTargetMax = Math.max(
+          subMeta.maxPage,
+          expectedListFilms ? Math.ceil(expectedListFilms / 100) : 1
+        );
+        if (newTargetMax > totalPages && newTargetMax <= 100) {
+          totalPages = newTargetMax;
+        }
+
         const parsedPage = parseLetterboxdHtmlOrRssToResult(
           html,
           baseUrl,
           'paginated_crawl'
         );
+        listPageItemCounts.set(pageNum, parsedPage.films.length);
         for (const f of parsedPage.films) {
           const key = `slug::${f.slug.toLowerCase()}`;
           if (!allFilmsMap.has(key)) {
@@ -1334,18 +1985,135 @@ export async function crawlPaginatedLetterboxdList(
       }
 
       const highestDone = batch[batch.length - 1];
-      options?.onProgress?.({
-        phase: 'lists_expand',
-        message: `Scraped List Page ${highestDone} / ${totalPages} (${allFilmsMap.size} films)...`,
-        filmsScraped: allFilmsMap.size,
-        currentFilmPage: highestDone,
-        totalFilmPages: totalPages,
-        listsScraped: 1,
-        currentListPage: highestDone,
-        totalListPages: totalPages,
-      });
+      options?.onProgress?.(
+        buildScraperProgress({
+          phase: 'lists_expand',
+          phaseLabel: 'Crawling Curated List Pages',
+          message: `Scraped List Page ${highestDone} of ${totalPages} (${allFilmsMap.size.toLocaleString()} films discovered)...`,
+          filmsScraped: allFilmsMap.size,
+          expectedTotalFilms: expectedListFilms,
+          currentFilmPage: highestDone,
+          totalFilmPages: totalPages,
+          listsScraped: 1,
+          expectedTotalLists: 1,
+          currentListPage: highestDone,
+          totalListPages: totalPages,
+          startedAtMs,
+          retryCount: totalRetriesCount,
+          lastBackoffDelayMs,
+        })
+      );
     }
   }
+
+  // Post-Crawl Gap Analysis & Targeted Missing-Page Queue for Curated Lists
+  const initialListGap = analyzeCrawlPageGaps({
+    discoveredMaxPage: totalPages,
+    expectedTotalItems: expectedListFilms,
+    itemsPerPage: 100,
+    maxAllowedPages: 100,
+    actualUniqueItems: allFilmsMap.size,
+    pageItemCounts: listPageItemCounts,
+  });
+  totalPages = initialListGap.targetTotalPages;
+  const recoveredListPages: number[] = [];
+
+  if (initialListGap.missingPages.length > 0 && !options?.abortSignal?.aborted) {
+    let pagesToRecover = [...initialListGap.missingPages];
+    for (let pass = 1; pass <= 2 && pagesToRecover.length > 0; pass++) {
+      if (options?.abortSignal?.aborted) break;
+      const rangesStr = formatPageRangesCompact(pagesToRecover);
+      options?.onProgress?.(
+        buildScraperProgress({
+          phase: 'gap_analysis',
+          phaseLabel: `Gap-Analysis Recovery (Pass ${pass})`,
+          message: `Detected ${pagesToRecover.length} missing list page(s) [${rangesStr}]. Queuing targeted page recovery...`,
+          filmsScraped: allFilmsMap.size,
+          expectedTotalFilms: expectedListFilms,
+          currentFilmPage: pagesCompleted,
+          totalFilmPages: totalPages,
+          listsScraped: 1,
+          expectedTotalLists: 1,
+          currentListPage: pagesCompleted,
+          totalListPages: totalPages,
+          startedAtMs,
+          retryCount: totalRetriesCount,
+          lastBackoffDelayMs,
+          gapAnalysisActive: true,
+          missingPagesQueued: pagesToRecover.length,
+          missingRangesLabel: rangesStr,
+          gapPagesRecovered: recoveredListPages.length,
+        })
+      );
+
+      const RECOVERY_BATCH = 3;
+      for (let i = 0; i < pagesToRecover.length; i += RECOVERY_BATCH) {
+        if (options?.abortSignal?.aborted) break;
+        const batch = pagesToRecover.slice(i, i + RECOVERY_BATCH);
+        const batchHtmls = await Promise.all(
+          batch.map((pageNum) =>
+            fetchLetterboxdPageHybrid(
+              pageNum === 1 ? baseUrl : `${baseUrl}page/${pageNum}/`,
+              options?.preferBrowserFetch,
+              {
+                maxRetries: 5,
+                abortSignal: options?.abortSignal,
+                onRetry: (info) => {
+                  totalRetriesCount++;
+                  lastBackoffDelayMs = info.delayMs;
+                },
+              }
+            )
+          )
+        );
+        for (let idx = 0; idx < batchHtmls.length; idx++) {
+          const html = batchHtmls[idx];
+          const pageNum = batch[idx];
+          if (!html) continue;
+          const parsedPage = parseLetterboxdHtmlOrRssToResult(
+            html,
+            baseUrl,
+            'paginated_crawl'
+          );
+          if (parsedPage.films.length > 0) {
+            if ((listPageItemCounts.get(pageNum) ?? 0) === 0) {
+              pagesCompleted++;
+            }
+            listPageItemCounts.set(pageNum, parsedPage.films.length);
+            if (!recoveredListPages.includes(pageNum)) {
+              recoveredListPages.push(pageNum);
+            }
+            for (const f of parsedPage.films) {
+              const key = `slug::${f.slug.toLowerCase()}`;
+              if (!allFilmsMap.has(key)) {
+                f.customRank = allFilmsMap.size + 1;
+                allFilmsMap.set(key, f);
+              }
+            }
+          }
+        }
+      }
+
+      const recheckGap = analyzeCrawlPageGaps({
+        discoveredMaxPage: totalPages,
+        expectedTotalItems: expectedListFilms,
+        itemsPerPage: 100,
+        maxAllowedPages: 100,
+        actualUniqueItems: allFilmsMap.size,
+        pageItemCounts: listPageItemCounts,
+      });
+      pagesToRecover = recheckGap.missingPages;
+    }
+  }
+
+  const finalListGap = analyzeCrawlPageGaps({
+    discoveredMaxPage: totalPages,
+    expectedTotalItems: expectedListFilms,
+    itemsPerPage: 100,
+    maxAllowedPages: 100,
+    actualUniqueItems: allFilmsMap.size,
+    pageItemCounts: listPageItemCounts,
+  });
 
   const combinedFilms = Array.from(allFilmsMap.values());
   if (page1Parsed.list) {
@@ -1362,7 +2130,62 @@ export async function crawlPaginatedLetterboxdList(
     page1Parsed.list?.name || page1Parsed.title
   }" (${combinedFilms.length} films across ${totalPages} page${
     totalPages === 1 ? '' : 's'
+  }${
+    recoveredListPages.length > 0
+      ? ` · Gap-analysis recovered ${recoveredListPages.length} page(s)`
+      : ' · Gap-analysis verified 0 missing pages'
   }) and added to Curated Lists & Poster Catalog.`;
+
+  page1Parsed.paginationSummary = {
+    filmPagesCrawled: pagesCompleted,
+    totalFilmPages: totalPages,
+    expectedTotalFilms: expectedListFilms ?? combinedFilms.length,
+    listPagesCrawled: pagesCompleted,
+    totalListPages: totalPages,
+    expectedTotalLists: 1,
+    gapAnalysis: {
+      films: {
+        targetTotalPages: totalPages,
+        expectedTotalItems: expectedListFilms,
+        actualUniqueItems: combinedFilms.length,
+        itemShortfall: finalListGap.itemShortfall,
+        initialMissingPages: initialListGap.missingPages,
+        initialMissingRanges: initialListGap.missingRanges,
+        initialMissingRangesLabel: initialListGap.missingRangesLabel,
+        recoveredPages: recoveredListPages,
+        remainingMissingPages: finalListGap.missingPages,
+        remainingMissingRangesLabel: finalListGap.missingRangesLabel,
+        verifiedComplete: finalListGap.missingPages.length === 0,
+      },
+    },
+  };
+
+  options?.onProgress?.(
+    buildScraperProgress({
+      phase: 'complete',
+      phaseLabel: 'Collection Crawl Complete',
+      message: `Completed list crawl: ${combinedFilms.length.toLocaleString()} films across ${pagesCompleted} page(s) (${
+        finalListGap.missingPages.length === 0
+          ? '0 page gaps'
+          : `${finalListGap.missingPages.length} unresolved page(s)`
+      }).`,
+      filmsScraped: combinedFilms.length,
+      expectedTotalFilms: expectedListFilms ?? combinedFilms.length,
+      currentFilmPage: pagesCompleted,
+      totalFilmPages: totalPages,
+      listsScraped: 1,
+      expectedTotalLists: 1,
+      currentListPage: pagesCompleted,
+      totalListPages: totalPages,
+      startedAtMs,
+      retryCount: totalRetriesCount,
+      lastBackoffDelayMs,
+      gapAnalysisActive: false,
+      missingPagesQueued: finalListGap.missingPages.length,
+      missingRangesLabel: finalListGap.missingRangesLabel,
+      gapPagesRecovered: recoveredListPages.length,
+    })
+  );
 
   return page1Parsed;
 }
@@ -1384,29 +2207,67 @@ export async function crawlPaginatedLetterboxdProfile(
     abortSignal?: AbortSignal;
   }
 ): Promise<ScrapeUtilityResult | null> {
+  const startedAtMs = Date.now();
   const cleanUser = username.trim().replace(/^@/, '') || 'dave';
   const profileUrl = `https://letterboxd.com/${encodeURIComponent(cleanUser)}/`;
   const filmsBaseUrl = `${profileUrl}films/`;
   const listsBaseUrl = `${profileUrl}lists/`;
   const rssUrl = `${profileUrl}rss/`;
 
-  options?.onProgress?.({
-    phase: 'discovering',
-    message: `Discovering total film & list counts for @${cleanUser} across /films/, /lists/, and /rss/...`,
-    filmsScraped: 0,
-    currentFilmPage: 0,
-    totalFilmPages: 1,
-    listsScraped: 0,
-    currentListPage: 0,
-    totalListPages: 1,
-  });
+  options?.onProgress?.(
+    buildScraperProgress({
+      phase: 'discovering',
+      phaseLabel: 'Discovering Collection Totals',
+      message: `Inspecting @${cleanUser}'s profile header, /films/ pagination, and /lists/ index...`,
+      filmsScraped: 0,
+      currentFilmPage: 0,
+      totalFilmPages: 1,
+      listsScraped: 0,
+      currentListPage: 0,
+      totalListPages: 1,
+      startedAtMs,
+    })
+  );
 
-  // Step 1: Parallel Discovery of Profile Root, RSS Feed, Watched Films Page 1, and Lists Index Page 1
+  let totalRetriesCount = 0;
+  let lastBackoffDelayMs: number | undefined;
+
+  // Step 1: Parallel Discovery of Profile Root, RSS Feed, Watched Films Page 1 (/films/page/1/), and Lists Index Page 1 (/lists/page/1/)
+  const discoveryRetryOpts = {
+    abortSignal: options?.abortSignal,
+    onRetry: (info: {
+      attempt: number;
+      maxRetries: number;
+      delayMs: number;
+      reason: string;
+      url: string;
+    }) => {
+      totalRetriesCount++;
+      lastBackoffDelayMs = info.delayMs;
+      options?.onProgress?.(
+        buildScraperProgress({
+          phase: 'discovering',
+          phaseLabel: 'Exponential Backoff Retry',
+          message: `${info.reason} during profile discovery — retry ${info.attempt}/${info.maxRetries} in ${(info.delayMs / 1000).toFixed(1)}s...`,
+          filmsScraped: 0,
+          currentFilmPage: 0,
+          totalFilmPages: 1,
+          listsScraped: 0,
+          currentListPage: 0,
+          totalListPages: 1,
+          startedAtMs,
+          retryCount: totalRetriesCount,
+          lastBackoffDelayMs: info.delayMs,
+        })
+      );
+    },
+  };
+
   const [profileRootHtml, rssXml, filmsPage1Html, listsPage1Html] = await Promise.all([
-    fetchLetterboxdPageHybrid(profileUrl, options?.preferBrowserFetch),
-    fetchLetterboxdPageHybrid(rssUrl, options?.preferBrowserFetch),
-    fetchLetterboxdPageHybrid(filmsBaseUrl, options?.preferBrowserFetch),
-    fetchLetterboxdPageHybrid(listsBaseUrl, options?.preferBrowserFetch),
+    fetchLetterboxdPageHybrid(profileUrl, options?.preferBrowserFetch, discoveryRetryOpts),
+    fetchLetterboxdPageHybrid(rssUrl, options?.preferBrowserFetch, discoveryRetryOpts),
+    fetchLetterboxdPageHybrid(`${filmsBaseUrl}page/1/`, options?.preferBrowserFetch, discoveryRetryOpts),
+    fetchLetterboxdPageHybrid(`${listsBaseUrl}page/1/`, options?.preferBrowserFetch, discoveryRetryOpts),
   ]);
 
   const masterFilmsBySlug = new Map<string, FilmEntry>();
@@ -1416,8 +2277,8 @@ export async function crawlPaginatedLetterboxdProfile(
   const mergeFilmIntoMaster = (entry: FilmEntry) => {
     const slugKey = `slug::${entry.slug.toLowerCase()}`;
     const titleKey = `${entry.title.toLowerCase()}::${entry.year}`;
-    const existing =
-      masterFilmsBySlug.get(slugKey) || masterFilmsByTitleYear.get(titleKey);
+    // Key primarily by explicit Letterboxd slug so two distinct films sharing a title & year never overwrite each other
+    const existing = masterFilmsBySlug.get(slugKey);
 
     if (existing) {
       if (existing.rating === null && entry.rating !== null) {
@@ -1445,7 +2306,9 @@ export async function crawlPaginatedLetterboxdProfile(
 
     entry.customRank = masterFilmsBySlug.size + 1;
     masterFilmsBySlug.set(slugKey, entry);
-    masterFilmsByTitleYear.set(titleKey, entry);
+    if (!masterFilmsByTitleYear.has(titleKey)) {
+      masterFilmsByTitleYear.set(titleKey, entry);
+    }
   };
 
   const mergeListIntoMaster = (listPayload: ScrapedListPayload) => {
@@ -1483,7 +2346,11 @@ export async function crawlPaginatedLetterboxdProfile(
     if (rootMeta.expectedTotalLists) expectedTotalLists = rootMeta.expectedTotalLists;
   }
 
-  // Parse Page 1 of /films/ first so watched films establish the primary catalog order
+  // Per-page item counters for intelligent post-crawl gap analysis
+  const filmPageItemCounts = new Map<number, number>();
+  const listPageItemCounts = new Map<number, number>();
+
+  // Parse Page 1 of /films/page/1/ first so watched films establish the primary catalog order
   let totalFilmPages = 1;
   let filmPagesCrawled = 0;
   if (filmsPage1Html) {
@@ -1500,22 +2367,23 @@ export async function crawlPaginatedLetterboxdProfile(
       : 1;
     totalFilmPages = Math.min(
       Math.max(fMeta.maxPage, computedFromTotal, 1),
-      250
+      2000
     );
 
     const parsedF1 = parseLetterboxdHtmlOrRssToResult(
       filmsPage1Html,
-      filmsBaseUrl,
+      `${filmsBaseUrl}page/1/`,
       'paginated_crawl'
     );
+    filmPageItemCounts.set(1, parsedF1.films.length);
     for (const f of parsedF1.films) {
       mergeFilmIntoMaster(f);
     }
   } else if (expectedTotalFilms) {
-    totalFilmPages = Math.min(Math.ceil(expectedTotalFilms / 72), 250);
+    totalFilmPages = Math.min(Math.ceil(expectedTotalFilms / 72), 2000);
   }
 
-  // Parse Page 1 of /lists/ index (12 lists per page)
+  // Parse Page 1 of /lists/page/1/ index (12 lists per page)
   let totalListPages = 1;
   let listPagesCrawled = 0;
   if (listsPage1Html) {
@@ -1529,85 +2397,117 @@ export async function crawlPaginatedLetterboxdProfile(
       : 1;
     totalListPages = Math.min(
       Math.max(lMeta.maxPage, computedListPages, 1),
-      100
+      500
     );
 
     const page1Lists = parseLetterboxdListsIndexHtml(listsPage1Html, cleanUser);
+    listPageItemCounts.set(1, page1Lists.length);
     for (const l of page1Lists) {
       mergeListIntoMaster(l);
-      for (const f of l.films) {
-        mergeFilmIntoMaster(f);
-      }
     }
   } else if (expectedTotalLists) {
-    totalListPages = Math.min(Math.ceil(expectedTotalLists / 12), 100);
+    totalListPages = Math.min(Math.ceil(expectedTotalLists / 12), 500);
   }
 
-  // Also overlay RSS feed items (recent reviews, exact watchedDates, and recent 50 lists)
-  if (rssXml) {
-    const rssParsed = parseLetterboxdHtmlOrRssToResult(rssXml, rssUrl, 'rss_feed');
-    if (rssParsed.profile?.displayName && displayName.startsWith('@')) {
-      displayName = rssParsed.profile.displayName;
-    }
-    // Only merge RSS lists automatically; for RSS films, merge watched films and review metadata
-    for (const f of rssParsed.films) {
-      mergeFilmIntoMaster(f);
-    }
-    if (rssParsed.lists) {
-      for (const l of rssParsed.lists) {
-        mergeListIntoMaster(l);
-      }
-    }
-  }
+  options?.onProgress?.(
+    buildScraperProgress({
+      phase: 'films',
+      phaseLabel: 'Crawling Watched Films Grid',
+      message: `Discovered ${
+        expectedTotalFilms ? `${expectedTotalFilms.toLocaleString()} films` : `${totalFilmPages} film pages`
+      } & ${
+        expectedTotalLists ? `${expectedTotalLists.toLocaleString()} lists` : `${totalListPages} list pages`
+      }. Iteratively crawling /films/page/1..${totalFilmPages}...`,
+      filmsScraped: masterFilmsBySlug.size,
+      expectedTotalFilms,
+      currentFilmPage: filmPagesCrawled,
+      totalFilmPages,
+      listsScraped: masterListsByUrl.size,
+      expectedTotalLists,
+      currentListPage: listPagesCrawled,
+      totalListPages,
+      startedAtMs,
+    })
+  );
 
-  options?.onProgress?.({
-    phase: 'films',
-    message: `Discovered target: ${
-      expectedTotalFilms ? `${expectedTotalFilms.toLocaleString()} films` : `${totalFilmPages} film pages`
-    } & ${
-      expectedTotalLists ? `${expectedTotalLists.toLocaleString()} lists` : `${totalListPages} list pages`
-    }. Crawling watched films...`,
-    filmsScraped: masterFilmsBySlug.size,
-    expectedTotalFilms,
-    currentFilmPage: filmPagesCrawled,
-    totalFilmPages,
-    listsScraped: masterListsByUrl.size,
-    expectedTotalLists,
-    currentListPage: listPagesCrawled,
-    totalListPages,
-  });
-
-  // Step 2: Crawl all remaining Watched Film pages (/films/page/2..totalFilmPages/)
-  if (totalFilmPages > 1) {
-    const startPage = filmsPage1Html ? 2 : 1;
-    const filmPageNumbers = Array.from(
-      { length: totalFilmPages - startPage + 1 },
-      (_, idx) => startPage + idx
-    );
-    const FILM_BATCH_CONCURRENCY = 6;
+  // Step 2: Iteratively crawl all Watched Film pages (/films/page/2, /films/page/3 ... /films/page/totalFilmPages)
+  if (totalFilmPages > 1 || !filmsPage1Html) {
+    let nextPageCursor = filmsPage1Html ? 2 : 1;
+    const FILM_BATCH_CONCURRENCY = 8;
     let consecutiveEmptyBatches = 0;
 
-    for (let i = 0; i < filmPageNumbers.length; i += FILM_BATCH_CONCURRENCY) {
+    while (nextPageCursor <= totalFilmPages) {
       if (options?.abortSignal?.aborted) break;
-      const batch = filmPageNumbers.slice(i, i + FILM_BATCH_CONCURRENCY);
+      const batch: number[] = [];
+      for (
+        let p = nextPageCursor;
+        p < nextPageCursor + FILM_BATCH_CONCURRENCY && p <= totalFilmPages;
+        p++
+      ) {
+        batch.push(p);
+      }
+      nextPageCursor += batch.length;
+
       const batchHtmls = await Promise.all(
         batch.map((pageNum) =>
           fetchLetterboxdPageHybrid(
             `${filmsBaseUrl}page/${pageNum}/`,
-            options?.preferBrowserFetch
+            options?.preferBrowserFetch,
+            {
+              abortSignal: options?.abortSignal,
+              onRetry: (info) => {
+                totalRetriesCount++;
+                lastBackoffDelayMs = info.delayMs;
+                options?.onProgress?.(
+                  buildScraperProgress({
+                    phase: 'films',
+                    phaseLabel: 'Exponential Backoff Retry',
+                    message: `${info.reason} on /films/page/${pageNum}/ — retry ${info.attempt}/${info.maxRetries} in ${(info.delayMs / 1000).toFixed(1)}s...`,
+                    filmsScraped: masterFilmsBySlug.size,
+                    expectedTotalFilms,
+                    currentFilmPage: pageNum,
+                    totalFilmPages,
+                    listsScraped: masterListsByUrl.size,
+                    expectedTotalLists,
+                    currentListPage: listPagesCrawled,
+                    totalListPages,
+                    startedAtMs,
+                    retryCount: totalRetriesCount,
+                    lastBackoffDelayMs: info.delayMs,
+                  })
+                );
+              },
+            }
           )
         )
       );
 
       let addedInBatch = 0;
-      for (const html of batchHtmls) {
+      for (let idx = 0; idx < batchHtmls.length; idx++) {
+        const html = batchHtmls[idx];
+        const pageNum = batch[idx];
         if (!html) continue;
         filmPagesCrawled++;
+
+        // Dynamically update expectedTotalFilms & totalFilmPages if pagination metadata on this page reveals higher counts
+        const pageMeta = extractPaginationMetadata(html);
+        if (pageMeta.expectedTotalFilms && (!expectedTotalFilms || pageMeta.expectedTotalFilms > expectedTotalFilms)) {
+          expectedTotalFilms = pageMeta.expectedTotalFilms;
+        }
+        const computedMax = Math.max(
+          pageMeta.maxPage,
+          expectedTotalFilms ? Math.ceil(expectedTotalFilms / 72) : 1
+        );
+        if (computedMax > totalFilmPages && computedMax <= 2000) {
+          totalFilmPages = computedMax;
+        }
+
         const parsedPage = parseLetterboxdHtmlOrRssToResult(
           html,
-          filmsBaseUrl,
+          `${filmsBaseUrl}page/${pageNum}/`,
           'paginated_crawl'
         );
+        filmPageItemCounts.set(pageNum, parsedPage.films.length);
         for (const f of parsedPage.films) {
           const prevSize = masterFilmsBySlug.size;
           mergeFilmIntoMaster(f);
@@ -1616,20 +2516,26 @@ export async function crawlPaginatedLetterboxdProfile(
       }
 
       const currentMaxPage = batch[batch.length - 1];
-      options?.onProgress?.({
-        phase: 'films',
-        message: `Scraping Watched Films: Page ${currentMaxPage} / ${totalFilmPages} (${masterFilmsBySlug.size.toLocaleString()}${
-          expectedTotalFilms ? ` / ${expectedTotalFilms.toLocaleString()}` : ''
-        } films)...`,
-        filmsScraped: masterFilmsBySlug.size,
-        expectedTotalFilms,
-        currentFilmPage: currentMaxPage,
-        totalFilmPages,
-        listsScraped: masterListsByUrl.size,
-        expectedTotalLists,
-        currentListPage: listPagesCrawled,
-        totalListPages,
-      });
+      options?.onProgress?.(
+        buildScraperProgress({
+          phase: 'films',
+          phaseLabel: 'Crawling Watched Films Grid',
+          message: `Crawled /films/page/${currentMaxPage}/ of ${totalFilmPages} (${masterFilmsBySlug.size.toLocaleString()}${
+            expectedTotalFilms ? ` / ${expectedTotalFilms.toLocaleString()}` : ''
+          } films captured)...`,
+          filmsScraped: masterFilmsBySlug.size,
+          expectedTotalFilms,
+          currentFilmPage: currentMaxPage,
+          totalFilmPages,
+          listsScraped: masterListsByUrl.size,
+          expectedTotalLists,
+          currentListPage: listPagesCrawled,
+          totalListPages,
+          startedAtMs,
+          retryCount: totalRetriesCount,
+          lastBackoffDelayMs,
+        })
+      );
 
       if (addedInBatch === 0 && batchHtmls.every((h) => !h)) {
         consecutiveEmptyBatches++;
@@ -1640,58 +2546,265 @@ export async function crawlPaginatedLetterboxdProfile(
     }
   }
 
-  // Step 3: Crawl all remaining Curated Lists Index pages (/lists/page/2..totalListPages/)
-  if (totalListPages > 1) {
-    const startListPage = listsPage1Html ? 2 : 1;
-    const listPageNumbers = Array.from(
-      { length: totalListPages - startListPage + 1 },
-      (_, idx) => startListPage + idx
-    );
-    const LIST_BATCH_CONCURRENCY = 5;
+  // Step 2B: Intelligent Post-Crawl Total Detection & Gap-Analysis Queue for Watched Films
+  const initialFilmGap = analyzeCrawlPageGaps({
+    discoveredMaxPage: totalFilmPages,
+    expectedTotalItems: expectedTotalFilms,
+    itemsPerPage: 72,
+    maxAllowedPages: 2000,
+    actualUniqueItems: masterFilmsBySlug.size,
+    pageItemCounts: filmPageItemCounts,
+  });
+  totalFilmPages = initialFilmGap.targetTotalPages;
+  const recoveredFilmPages: number[] = [];
+
+  if (initialFilmGap.missingPages.length > 0 && !options?.abortSignal?.aborted) {
+    let missingQueue = [...initialFilmGap.missingPages];
+    const MAX_GAP_RECOVERY_PASSES = 2;
+
+    for (
+      let pass = 1;
+      pass <= MAX_GAP_RECOVERY_PASSES && missingQueue.length > 0;
+      pass++
+    ) {
+      if (options?.abortSignal?.aborted) break;
+      const missingRangesStr = formatPageRangesCompact(missingQueue);
+
+      options?.onProgress?.(
+        buildScraperProgress({
+          phase: 'gap_analysis',
+          phaseLabel: `Gap-Analysis Queue (Pass ${pass}/${MAX_GAP_RECOVERY_PASSES})`,
+          message: `Gap-analysis detected ${missingQueue.length} missing film page(s) [${missingRangesStr}] (${masterFilmsBySlug.size.toLocaleString()}${
+            expectedTotalFilms ? ` / ${expectedTotalFilms.toLocaleString()}` : ''
+          } films). Queuing only missing ranges...`,
+          filmsScraped: masterFilmsBySlug.size,
+          expectedTotalFilms,
+          currentFilmPage: filmPagesCrawled,
+          totalFilmPages,
+          listsScraped: masterListsByUrl.size,
+          expectedTotalLists,
+          currentListPage: listPagesCrawled,
+          totalListPages,
+          startedAtMs,
+          retryCount: totalRetriesCount,
+          lastBackoffDelayMs,
+          gapAnalysisActive: true,
+          missingPagesQueued: missingQueue.length,
+          missingRangesLabel: missingRangesStr,
+          gapPagesRecovered: recoveredFilmPages.length,
+        })
+      );
+
+      const GAP_BATCH_CONCURRENCY = 4;
+      for (let i = 0; i < missingQueue.length; i += GAP_BATCH_CONCURRENCY) {
+        if (options?.abortSignal?.aborted) break;
+        const batch = missingQueue.slice(i, i + GAP_BATCH_CONCURRENCY);
+
+        const batchHtmls = await Promise.all(
+          batch.map((pageNum) =>
+            fetchLetterboxdPageHybrid(
+              `${filmsBaseUrl}page/${pageNum}/`,
+              options?.preferBrowserFetch,
+              {
+                maxRetries: 5,
+                baseDelayMs: 600,
+                abortSignal: options?.abortSignal,
+                onRetry: (info) => {
+                  totalRetriesCount++;
+                  lastBackoffDelayMs = info.delayMs;
+                  options?.onProgress?.(
+                    buildScraperProgress({
+                      phase: 'gap_analysis',
+                      phaseLabel: 'Gap-Recovery Backoff Retry',
+                      message: `${info.reason} recovering /films/page/${pageNum}/ — retry ${info.attempt}/${info.maxRetries} in ${(info.delayMs / 1000).toFixed(1)}s...`,
+                      filmsScraped: masterFilmsBySlug.size,
+                      expectedTotalFilms,
+                      currentFilmPage: pageNum,
+                      totalFilmPages,
+                      listsScraped: masterListsByUrl.size,
+                      expectedTotalLists,
+                      currentListPage: listPagesCrawled,
+                      totalListPages,
+                      startedAtMs,
+                      retryCount: totalRetriesCount,
+                      lastBackoffDelayMs: info.delayMs,
+                      gapAnalysisActive: true,
+                      missingPagesQueued: missingQueue.length - i,
+                      missingRangesLabel: missingRangesStr,
+                      gapPagesRecovered: recoveredFilmPages.length,
+                    })
+                  );
+                },
+              }
+            )
+          )
+        );
+
+        for (let idx = 0; idx < batchHtmls.length; idx++) {
+          const html = batchHtmls[idx];
+          const pageNum = batch[idx];
+          if (!html) continue;
+
+          const parsedPage = parseLetterboxdHtmlOrRssToResult(
+            html,
+            `${filmsBaseUrl}page/${pageNum}/`,
+            'paginated_crawl'
+          );
+          if (parsedPage.films.length > 0) {
+            if ((filmPageItemCounts.get(pageNum) ?? 0) === 0) {
+              filmPagesCrawled++;
+            }
+            filmPageItemCounts.set(pageNum, parsedPage.films.length);
+            if (!recoveredFilmPages.includes(pageNum)) {
+              recoveredFilmPages.push(pageNum);
+            }
+            for (const f of parsedPage.films) {
+              mergeFilmIntoMaster(f);
+            }
+          }
+        }
+
+        options?.onProgress?.(
+          buildScraperProgress({
+            phase: 'gap_analysis',
+            phaseLabel: `Recovering Missing Film Pages`,
+            message: `Recovered ${recoveredFilmPages.length} missing film page(s) (${masterFilmsBySlug.size.toLocaleString()}${
+              expectedTotalFilms ? ` / ${expectedTotalFilms.toLocaleString()}` : ''
+            } films captured)...`,
+            filmsScraped: masterFilmsBySlug.size,
+            expectedTotalFilms,
+            currentFilmPage: filmPagesCrawled,
+            totalFilmPages,
+            listsScraped: masterListsByUrl.size,
+            expectedTotalLists,
+            currentListPage: listPagesCrawled,
+            totalListPages,
+            startedAtMs,
+            retryCount: totalRetriesCount,
+            lastBackoffDelayMs,
+            gapAnalysisActive: true,
+            missingPagesQueued: Math.max(0, missingQueue.length - (i + batch.length)),
+            missingRangesLabel: missingRangesStr,
+            gapPagesRecovered: recoveredFilmPages.length,
+          })
+        );
+      }
+
+      const recheckFilmGap = analyzeCrawlPageGaps({
+        discoveredMaxPage: totalFilmPages,
+        expectedTotalItems: expectedTotalFilms,
+        itemsPerPage: 72,
+        maxAllowedPages: 2000,
+        actualUniqueItems: masterFilmsBySlug.size,
+        pageItemCounts: filmPageItemCounts,
+      });
+      missingQueue = recheckFilmGap.missingPages;
+    }
+  }
+
+  // Step 3: Iteratively crawl all Curated Lists Index pages (/lists/page/2, /lists/page/3 ... /lists/page/totalListPages)
+  if (totalListPages > 1 || !listsPage1Html) {
+    let nextListPageCursor = listsPage1Html ? 2 : 1;
+    const LIST_BATCH_CONCURRENCY = 6;
     let consecutiveEmptyBatches = 0;
 
-    for (let i = 0; i < listPageNumbers.length; i += LIST_BATCH_CONCURRENCY) {
+    while (nextListPageCursor <= totalListPages) {
       if (options?.abortSignal?.aborted) break;
-      const batch = listPageNumbers.slice(i, i + LIST_BATCH_CONCURRENCY);
+      const batch: number[] = [];
+      for (
+        let p = nextListPageCursor;
+        p < nextListPageCursor + LIST_BATCH_CONCURRENCY && p <= totalListPages;
+        p++
+      ) {
+        batch.push(p);
+      }
+      nextListPageCursor += batch.length;
+
       const batchHtmls = await Promise.all(
         batch.map((pageNum) =>
           fetchLetterboxdPageHybrid(
             `${listsBaseUrl}page/${pageNum}/`,
-            options?.preferBrowserFetch
+            options?.preferBrowserFetch,
+            {
+              abortSignal: options?.abortSignal,
+              onRetry: (info) => {
+                totalRetriesCount++;
+                lastBackoffDelayMs = info.delayMs;
+                options?.onProgress?.(
+                  buildScraperProgress({
+                    phase: 'lists_index',
+                    phaseLabel: 'Exponential Backoff Retry',
+                    message: `${info.reason} on /lists/page/${pageNum}/ — retry ${info.attempt}/${info.maxRetries} in ${(info.delayMs / 1000).toFixed(1)}s...`,
+                    filmsScraped: masterFilmsBySlug.size,
+                    expectedTotalFilms,
+                    currentFilmPage: totalFilmPages,
+                    totalFilmPages,
+                    listsScraped: masterListsByUrl.size,
+                    expectedTotalLists,
+                    currentListPage: pageNum,
+                    totalListPages,
+                    startedAtMs,
+                    retryCount: totalRetriesCount,
+                    lastBackoffDelayMs: info.delayMs,
+                    gapPagesRecovered: recoveredFilmPages.length,
+                  })
+                );
+              },
+            }
           )
         )
       );
 
       let listsFoundInBatch = 0;
-      for (const html of batchHtmls) {
+      for (let idx = 0; idx < batchHtmls.length; idx++) {
+        const html = batchHtmls[idx];
+        const pageNum = batch[idx];
         if (!html) continue;
         listPagesCrawled++;
+
+        const lPageMeta = extractPaginationMetadata(html);
+        if (lPageMeta.expectedTotalLists && (!expectedTotalLists || lPageMeta.expectedTotalLists > expectedTotalLists)) {
+          expectedTotalLists = lPageMeta.expectedTotalLists;
+        }
+        const computedListMax = Math.max(
+          lPageMeta.maxPage,
+          expectedTotalLists ? Math.ceil(expectedTotalLists / 12) : 1
+        );
+        if (computedListMax > totalListPages && computedListMax <= 500) {
+          totalListPages = computedListMax;
+        }
+
         const pageLists = parseLetterboxdListsIndexHtml(html, cleanUser);
+        listPageItemCounts.set(pageNum, pageLists.length);
         for (const l of pageLists) {
           const prevSize = masterListsByUrl.size;
           mergeListIntoMaster(l);
           if (masterListsByUrl.size > prevSize) listsFoundInBatch++;
-          for (const f of l.films) {
-            mergeFilmIntoMaster(f);
-          }
         }
       }
 
       const currentMaxListPage = batch[batch.length - 1];
-      options?.onProgress?.({
-        phase: 'lists_index',
-        message: `Scraping Curated Lists Index: Page ${currentMaxListPage} / ${totalListPages} (${masterListsByUrl.size.toLocaleString()}${
-          expectedTotalLists ? ` / ${expectedTotalLists.toLocaleString()}` : ''
-        } lists)...`,
-        filmsScraped: masterFilmsBySlug.size,
-        expectedTotalFilms,
-        currentFilmPage: totalFilmPages,
-        totalFilmPages,
-        listsScraped: masterListsByUrl.size,
-        expectedTotalLists,
-        currentListPage: currentMaxListPage,
-        totalListPages,
-      });
+      options?.onProgress?.(
+        buildScraperProgress({
+          phase: 'lists_index',
+          phaseLabel: 'Crawling Curated Lists Index',
+          message: `Crawled /lists/page/${currentMaxListPage}/ of ${totalListPages} (${masterListsByUrl.size.toLocaleString()}${
+            expectedTotalLists ? ` / ${expectedTotalLists.toLocaleString()}` : ''
+          } lists captured)...`,
+          filmsScraped: masterFilmsBySlug.size,
+          expectedTotalFilms,
+          currentFilmPage: totalFilmPages,
+          totalFilmPages,
+          listsScraped: masterListsByUrl.size,
+          expectedTotalLists,
+          currentListPage: currentMaxListPage,
+          totalListPages,
+          startedAtMs,
+          retryCount: totalRetriesCount,
+          lastBackoffDelayMs,
+          gapPagesRecovered: recoveredFilmPages.length,
+        })
+      );
 
       if (listsFoundInBatch === 0 && batchHtmls.every((h) => !h)) {
         consecutiveEmptyBatches++;
@@ -1702,42 +2815,186 @@ export async function crawlPaginatedLetterboxdProfile(
     }
   }
 
-  // Step 4: Expand full film entries for lists that only have truncated RSS/index previews
-  if (options?.expandAllListContents !== false && masterListsByUrl.size > 0) {
-    const listsNeedingExpansion = Array.from(masterListsByUrl.values()).filter(
-      (l) =>
-        l.films.length === 0 ||
-        (l.expectedFilmCount && l.expectedFilmCount > l.films.length) ||
-        l.films.length === 5 ||
-        l.films.length === 10
-    );
+  // Step 3B: Intelligent Post-Crawl Gap-Analysis Queue for Curated Lists Index
+  const initialListIndexGap = analyzeCrawlPageGaps({
+    discoveredMaxPage: totalListPages,
+    expectedTotalItems: expectedTotalLists,
+    itemsPerPage: 12,
+    maxAllowedPages: 500,
+    actualUniqueItems: masterListsByUrl.size,
+    pageItemCounts: listPageItemCounts,
+  });
+  totalListPages = initialListIndexGap.targetTotalPages;
+  const recoveredListIndexPages: number[] = [];
 
-    const EXPAND_BATCH = 5;
+  if (initialListIndexGap.missingPages.length > 0 && !options?.abortSignal?.aborted) {
+    let missingListQueue = [...initialListIndexGap.missingPages];
+    for (let pass = 1; pass <= 2 && missingListQueue.length > 0; pass++) {
+      if (options?.abortSignal?.aborted) break;
+      const listRangesStr = formatPageRangesCompact(missingListQueue);
+
+      options?.onProgress?.(
+        buildScraperProgress({
+          phase: 'gap_analysis',
+          phaseLabel: `List Gap-Analysis Queue (Pass ${pass})`,
+          message: `Gap-analysis detected ${missingListQueue.length} missing list index page(s) [${listRangesStr}]. Queuing targeted recovery...`,
+          filmsScraped: masterFilmsBySlug.size,
+          expectedTotalFilms,
+          currentFilmPage: totalFilmPages,
+          totalFilmPages,
+          listsScraped: masterListsByUrl.size,
+          expectedTotalLists,
+          currentListPage: listPagesCrawled,
+          totalListPages,
+          startedAtMs,
+          retryCount: totalRetriesCount,
+          lastBackoffDelayMs,
+          gapAnalysisActive: true,
+          missingPagesQueued: missingListQueue.length,
+          missingRangesLabel: listRangesStr,
+          gapPagesRecovered: recoveredFilmPages.length + recoveredListIndexPages.length,
+        })
+      );
+
+      const GAP_LIST_BATCH = 4;
+      for (let i = 0; i < missingListQueue.length; i += GAP_LIST_BATCH) {
+        if (options?.abortSignal?.aborted) break;
+        const batch = missingListQueue.slice(i, i + GAP_LIST_BATCH);
+        const batchHtmls = await Promise.all(
+          batch.map((pageNum) =>
+            fetchLetterboxdPageHybrid(
+              `${listsBaseUrl}page/${pageNum}/`,
+              options?.preferBrowserFetch,
+              {
+                maxRetries: 5,
+                abortSignal: options?.abortSignal,
+                onRetry: (info) => {
+                  totalRetriesCount++;
+                  lastBackoffDelayMs = info.delayMs;
+                },
+              }
+            )
+          )
+        );
+
+        for (let idx = 0; idx < batchHtmls.length; idx++) {
+          const html = batchHtmls[idx];
+          const pageNum = batch[idx];
+          if (!html) continue;
+          const pageLists = parseLetterboxdListsIndexHtml(html, cleanUser);
+          if (pageLists.length > 0) {
+            if ((listPageItemCounts.get(pageNum) ?? 0) === 0) {
+              listPagesCrawled++;
+            }
+            listPageItemCounts.set(pageNum, pageLists.length);
+            if (!recoveredListIndexPages.includes(pageNum)) {
+              recoveredListIndexPages.push(pageNum);
+            }
+            for (const l of pageLists) {
+              mergeListIntoMaster(l);
+            }
+          }
+        }
+      }
+
+      const recheckListGap = analyzeCrawlPageGaps({
+        discoveredMaxPage: totalListPages,
+        expectedTotalItems: expectedTotalLists,
+        itemsPerPage: 12,
+        maxAllowedPages: 500,
+        actualUniqueItems: masterListsByUrl.size,
+        pageItemCounts: listPageItemCounts,
+      });
+      missingListQueue = recheckListGap.missingPages;
+    }
+  }
+
+  // Step 4: Overlay RSS feed metadata (full-text reviews, exact watchedDates, posters, and any recent lists)
+  if (rssXml) {
+    const rssParsed = parseLetterboxdHtmlOrRssToResult(rssXml, rssUrl, 'rss_feed');
+    if (rssParsed.profile?.displayName && displayName.startsWith('@')) {
+      displayName = rssParsed.profile.displayName;
+    }
+    for (const f of rssParsed.films) {
+      const slugKey = `slug::${f.slug.toLowerCase()}`;
+      const titleKey = `${f.title.toLowerCase()}::${f.year}`;
+      const existingWatched =
+        masterFilmsBySlug.get(slugKey) || masterFilmsByTitleYear.get(titleKey);
+      if (existingWatched) {
+        if (!existingWatched.posterUrl && f.posterUrl) {
+          existingWatched.posterUrl = f.posterUrl;
+        }
+        if (
+          f.notes &&
+          f.notes !== 'Logged via external profile view.' &&
+          !f.notes.startsWith('Included in curated list:')
+        ) {
+          existingWatched.notes = f.notes;
+        }
+        if (f.watchedDate) {
+          existingWatched.watchedDate = f.watchedDate;
+        }
+      } else if (filmPagesCrawled === 0) {
+        // Only add RSS films directly if HTML film pagination was unreachable
+        mergeFilmIntoMaster(f);
+      }
+    }
+    if (rssParsed.lists) {
+      for (const l of rssParsed.lists) {
+        mergeListIntoMaster(l);
+      }
+    }
+  }
+
+  // Step 5: Optional full list roster expansion (only when explicitly requested for lists missing preview entries)
+  let listsExpandedCount = 0;
+  let totalListsToExpand = 0;
+  if (options?.expandAllListContents === true && masterListsByUrl.size > 0) {
+    const listsNeedingExpansion = Array.from(masterListsByUrl.values()).filter(
+      (l) => l.films.length === 0
+    );
+    totalListsToExpand = listsNeedingExpansion.length;
+
+    const EXPAND_BATCH = 6;
     for (let i = 0; i < listsNeedingExpansion.length; i += EXPAND_BATCH) {
       if (options?.abortSignal?.aborted) break;
       const batch = listsNeedingExpansion.slice(i, i + EXPAND_BATCH);
+      listsExpandedCount = Math.min(i + EXPAND_BATCH, listsNeedingExpansion.length);
 
-      options?.onProgress?.({
-        phase: 'lists_expand',
-        message: `Expanding full film rosters for Curated Lists (${Math.min(
-          i + EXPAND_BATCH,
-          listsNeedingExpansion.length
-        )} / ${listsNeedingExpansion.length})...`,
-        filmsScraped: masterFilmsBySlug.size,
-        expectedTotalFilms,
-        currentFilmPage: totalFilmPages,
-        totalFilmPages,
-        listsScraped: masterListsByUrl.size,
-        expectedTotalLists,
-        currentListPage: totalListPages,
-        totalListPages,
-      });
+      options?.onProgress?.(
+        buildScraperProgress({
+          phase: 'lists_expand',
+          phaseLabel: 'Expanding Full List Rosters',
+          message: `Expanding film rosters for Curated Lists (${listsExpandedCount} of ${totalListsToExpand})...`,
+          filmsScraped: masterFilmsBySlug.size,
+          expectedTotalFilms,
+          currentFilmPage: totalFilmPages,
+          totalFilmPages,
+          listsScraped: masterListsByUrl.size,
+          expectedTotalLists,
+          currentListPage: totalListPages,
+          totalListPages,
+          listsExpandedCount,
+          totalListsToExpand,
+          startedAtMs,
+          retryCount: totalRetriesCount,
+          lastBackoffDelayMs,
+          gapPagesRecovered: recoveredFilmPages.length + recoveredListIndexPages.length,
+        })
+      );
 
       const expandedBatch = await Promise.all(
         batch.map(async (listItem) => {
           const html = await fetchLetterboxdPageHybrid(
             listItem.letterboxdUrl,
-            options?.preferBrowserFetch
+            options?.preferBrowserFetch,
+            {
+              abortSignal: options?.abortSignal,
+              onRetry: (info) => {
+                totalRetriesCount++;
+                lastBackoffDelayMs = info.delayMs;
+              },
+            }
           );
           if (!html) return null;
           const parsed = parseLetterboxdHtmlOrRssToResult(
@@ -1745,16 +3002,13 @@ export async function crawlPaginatedLetterboxdProfile(
             listItem.letterboxdUrl,
             'paginated_crawl'
           );
-          return { listItem, parsed, html };
+          return { listItem, parsed };
         })
       );
 
       for (const res of expandedBatch) {
         if (!res || res.parsed.films.length === 0) continue;
         res.listItem.films = res.parsed.films;
-        for (const f of res.parsed.films) {
-          mergeFilmIntoMaster(f);
-        }
       }
     }
   }
@@ -1766,18 +3020,64 @@ export async function crawlPaginatedLetterboxdProfile(
     return null;
   }
 
-  options?.onProgress?.({
-    phase: 'complete',
-    message: `Completed Full Paginated Scrape: ${finalFilms.length.toLocaleString()} films & ${finalLists.length.toLocaleString()} lists synced.`,
-    filmsScraped: finalFilms.length,
-    expectedTotalFilms,
-    currentFilmPage: filmPagesCrawled,
-    totalFilmPages,
-    listsScraped: finalLists.length,
-    expectedTotalLists,
-    currentListPage: listPagesCrawled,
-    totalListPages,
+  const finalFilmGap = analyzeCrawlPageGaps({
+    discoveredMaxPage: totalFilmPages,
+    expectedTotalItems: expectedTotalFilms,
+    itemsPerPage: 72,
+    maxAllowedPages: 2000,
+    actualUniqueItems: finalFilms.length,
+    pageItemCounts: filmPageItemCounts,
   });
+
+  const finalListGap = analyzeCrawlPageGaps({
+    discoveredMaxPage: totalListPages,
+    expectedTotalItems: expectedTotalLists,
+    itemsPerPage: 12,
+    maxAllowedPages: 500,
+    actualUniqueItems: finalLists.length,
+    pageItemCounts: listPageItemCounts,
+  });
+
+  const totalRecoveredPagesCount =
+    recoveredFilmPages.length + recoveredListIndexPages.length;
+  const totalRemainingGapsCount =
+    finalFilmGap.missingPages.length + finalListGap.missingPages.length;
+
+  const gapStatusNote =
+    totalRecoveredPagesCount > 0
+      ? `Gap-analysis recovered ${totalRecoveredPagesCount} missing page(s) (${
+          totalRemainingGapsCount === 0
+            ? '0 gaps remaining'
+            : `${totalRemainingGapsCount} unresolved page(s)`
+        }).`
+      : totalRemainingGapsCount === 0
+      ? 'Gap-analysis verified 100% page coverage (0 missing page ranges).'
+      : `Gap-analysis identified ${totalRemainingGapsCount} unreachable page(s) [${finalFilmGap.missingRangesLabel}].`;
+
+  options?.onProgress?.(
+    buildScraperProgress({
+      phase: 'complete',
+      phaseLabel: 'Collection Crawl & Gap-Analysis Complete',
+      message: `Completed Full Paginated Scrape: ${finalFilms.length.toLocaleString()} films & ${finalLists.length.toLocaleString()} lists synced. ${gapStatusNote}`,
+      filmsScraped: finalFilms.length,
+      expectedTotalFilms,
+      currentFilmPage: filmPagesCrawled,
+      totalFilmPages,
+      listsScraped: finalLists.length,
+      expectedTotalLists,
+      currentListPage: listPagesCrawled,
+      totalListPages,
+      listsExpandedCount,
+      totalListsToExpand,
+      startedAtMs,
+      retryCount: totalRetriesCount,
+      lastBackoffDelayMs,
+      gapAnalysisActive: false,
+      missingPagesQueued: totalRemainingGapsCount,
+      missingRangesLabel: finalFilmGap.missingRangesLabel,
+      gapPagesRecovered: totalRecoveredPagesCount,
+    })
+  );
 
   return {
     targetType: 'profile',
@@ -1790,10 +3090,10 @@ export async function crawlPaginatedLetterboxdProfile(
     notice: `Successfully crawled ${finalFilms.length.toLocaleString()} films (across ${Math.max(
       1,
       filmPagesCrawled
-    )} film page(s)) and ${finalLists.length.toLocaleString()} curated lists (across ${Math.max(
+    )}/${totalFilmPages} film page(s)) and ${finalLists.length.toLocaleString()} curated lists (across ${Math.max(
       1,
       listPagesCrawled
-    )} list index page(s)) for ${displayName} (@${cleanUser}).`,
+    )}/${totalListPages} list index page(s)) for ${displayName} (@${cleanUser}). ${gapStatusNote}`,
     films: finalFilms,
     list: finalLists[0],
     lists: finalLists,
@@ -1810,6 +3110,34 @@ export async function crawlPaginatedLetterboxdProfile(
       listPagesCrawled,
       totalListPages,
       expectedTotalLists,
+      gapAnalysis: {
+        films: {
+          targetTotalPages: totalFilmPages,
+          expectedTotalItems: expectedTotalFilms,
+          actualUniqueItems: finalFilms.length,
+          itemShortfall: finalFilmGap.itemShortfall,
+          initialMissingPages: initialFilmGap.missingPages,
+          initialMissingRanges: initialFilmGap.missingRanges,
+          initialMissingRangesLabel: initialFilmGap.missingRangesLabel,
+          recoveredPages: recoveredFilmPages,
+          remainingMissingPages: finalFilmGap.missingPages,
+          remainingMissingRangesLabel: finalFilmGap.missingRangesLabel,
+          verifiedComplete: finalFilmGap.missingPages.length === 0,
+        },
+        lists: {
+          targetTotalPages: totalListPages,
+          expectedTotalItems: expectedTotalLists,
+          actualUniqueItems: finalLists.length,
+          itemShortfall: finalListGap.itemShortfall,
+          initialMissingPages: initialListIndexGap.missingPages,
+          initialMissingRanges: initialListIndexGap.missingRanges,
+          initialMissingRangesLabel: initialListIndexGap.missingRangesLabel,
+          recoveredPages: recoveredListIndexPages,
+          remainingMissingPages: finalListGap.missingPages,
+          remainingMissingRangesLabel: finalListGap.missingRangesLabel,
+          verifiedComplete: finalListGap.missingPages.length === 0,
+        },
+      },
     },
   };
 }
@@ -1832,8 +3160,23 @@ export async function runLetterboxdScraper(
     abortSignal?: AbortSignal;
   }
 ): Promise<ScrapeUtilityResult> {
+  const startedAtMs = Date.now();
   const cleanInput = input.trim();
   if (options?.rawHtmlOverride?.trim()) {
+    options?.onProgress?.(
+      buildScraperProgress({
+        phase: 'discovering',
+        phaseLabel: 'Parsing Raw Page Source',
+        message: 'Extracting films and curated lists from provided HTML/RSS source...',
+        filmsScraped: 0,
+        currentFilmPage: 1,
+        totalFilmPages: 1,
+        listsScraped: 0,
+        currentListPage: 0,
+        totalListPages: 1,
+        startedAtMs,
+      })
+    );
     const response = await fetch('/api/letterboxd/scrape', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1843,13 +3186,43 @@ export async function runLetterboxdScraper(
       }),
     });
     if (response.ok) {
-      return (await response.json()) as ScrapeUtilityResult;
+      const resData = (await response.json()) as ScrapeUtilityResult;
+      options?.onProgress?.(
+        buildScraperProgress({
+          phase: 'complete',
+          phaseLabel: 'Source Parse Complete',
+          message: `Extracted ${resData.films.length.toLocaleString()} film(s) and ${(resData.lists?.length ?? 0).toLocaleString()} list(s).`,
+          filmsScraped: resData.films.length,
+          currentFilmPage: 1,
+          totalFilmPages: 1,
+          listsScraped: resData.lists?.length ?? 0,
+          currentListPage: 1,
+          totalListPages: 1,
+          startedAtMs,
+        })
+      );
+      return resData;
     }
-    return parseLetterboxdHtmlOrRssToResult(
+    const localParsed = parseLetterboxdHtmlOrRssToResult(
       options.rawHtmlOverride,
       cleanInput,
       'raw_html'
     );
+    options?.onProgress?.(
+      buildScraperProgress({
+        phase: 'complete',
+        phaseLabel: 'Source Parse Complete',
+        message: `Extracted ${localParsed.films.length.toLocaleString()} film(s) and ${(localParsed.lists?.length ?? 0).toLocaleString()} list(s).`,
+        filmsScraped: localParsed.films.length,
+        currentFilmPage: 1,
+        totalFilmPages: 1,
+        listsScraped: localParsed.lists?.length ?? 0,
+        currentListPage: 1,
+        totalListPages: 1,
+        startedAtMs,
+      })
+    );
+    return localParsed;
   }
 
   const detected = detectLetterboxdUrlType(cleanInput);
@@ -1886,12 +3259,30 @@ export async function runLetterboxdScraper(
     }
   }
 
+  options?.onProgress?.(
+    buildScraperProgress({
+      phase: 'discovering',
+      phaseLabel:
+        detected.type === 'film' ? 'Scraping Film Metadata' : 'Fetching Letterboxd Feed',
+      message: `Fetching ${detected.normalizedUrl}...`,
+      filmsScraped: 0,
+      currentFilmPage: 0,
+      totalFilmPages: 1,
+      listsScraped: 0,
+      currentListPage: 0,
+      totalListPages: 1,
+      startedAtMs,
+    })
+  );
+
   if (options?.preferBrowserFetch) {
     const urlToFetch =
       detected.type === 'profile'
         ? `https://letterboxd.com/${encodeURIComponent(detected.username || 'dave')}/rss/`
         : detected.normalizedUrl;
-    const browserHtml = await fetchLetterboxdViaBrowserProxy(urlToFetch);
+    const browserHtml = await fetchLetterboxdPageHybrid(urlToFetch, true, {
+      abortSignal: options?.abortSignal,
+    });
     if (browserHtml) {
       const parsed = parseLetterboxdHtmlOrRssToResult(
         browserHtml,
@@ -1899,20 +3290,55 @@ export async function runLetterboxdScraper(
         'browser_fetch'
       );
       if (parsed.films.length > 0) {
+        options?.onProgress?.(
+          buildScraperProgress({
+            phase: 'complete',
+            phaseLabel: 'Collection Crawl Complete',
+            message: parsed.notice,
+            filmsScraped: parsed.films.length,
+            currentFilmPage: 1,
+            totalFilmPages: 1,
+            listsScraped: parsed.lists?.length ?? 0,
+            currentListPage: 1,
+            totalListPages: 1,
+            startedAtMs,
+          })
+        );
         return parsed;
       }
     }
   }
 
-  // Primary Server-side proxy endpoint (/api/letterboxd/scrape)
-  const serverRes = await fetch('/api/letterboxd/scrape', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ urlOrInput: cleanInput }),
-  });
+  // Primary Server-side proxy endpoint (/api/letterboxd/scrape) with exponential backoff on HTTP 429 / 5xx / timeout
+  let serverRes: Response | null = null;
+  const maxServerAttempts = 3;
+  for (let attempt = 0; attempt <= maxServerAttempts; attempt++) {
+    try {
+      serverRes = await fetchWithTimeout(
+        '/api/letterboxd/scrape',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urlOrInput: cleanInput }),
+        },
+        15000,
+        options?.abortSignal
+      );
+      if (serverRes.ok || !isRetryableHttpStatus(serverRes.status) || attempt === maxServerAttempts) {
+        break;
+      }
+      const retryAfterMs = parseRetryAfterHeaderMs(serverRes.headers.get('Retry-After'));
+      const delayMs = computeExponentialBackoffMs(attempt, DEFAULT_SCRAPER_RETRY_CONFIG, retryAfterMs);
+      await sleepWithAbort(delayMs, options?.abortSignal);
+    } catch (err) {
+      if (attempt === maxServerAttempts) throw err;
+      const delayMs = computeExponentialBackoffMs(attempt, DEFAULT_SCRAPER_RETRY_CONFIG);
+      await sleepWithAbort(delayMs, options?.abortSignal);
+    }
+  }
 
-  if (!serverRes.ok) {
-    const errData = await serverRes.json().catch(() => ({}));
+  if (!serverRes || !serverRes.ok) {
+    const errData = serverRes ? await serverRes.json().catch(() => ({})) : {};
     throw new Error(
       (errData as { error?: string }).error || 'Failed to scrape Letterboxd URL.'
     );
@@ -1921,7 +3347,13 @@ export async function runLetterboxdScraper(
   const result = (await serverRes.json()) as ScrapeUtilityResult;
 
   if (!result.liveReachable && (detected.type === 'list' || detected.type === 'film')) {
-    const browserHtml = await fetchLetterboxdViaBrowserProxy(detected.normalizedUrl);
+    const { html: browserHtml } = await fetchLetterboxdViaBrowserProxy(
+      detected.normalizedUrl,
+      {
+        timeoutMs: DEFAULT_SCRAPER_RETRY_CONFIG.requestTimeoutMs,
+        abortSignal: options?.abortSignal,
+      }
+    );
     if (browserHtml) {
       const browserParsed = parseLetterboxdHtmlOrRssToResult(
         browserHtml,
@@ -1929,10 +3361,39 @@ export async function runLetterboxdScraper(
         'browser_fetch'
       );
       if (browserParsed.films.length > 0) {
+        options?.onProgress?.(
+          buildScraperProgress({
+            phase: 'complete',
+            phaseLabel: 'Collection Crawl Complete',
+            message: browserParsed.notice,
+            filmsScraped: browserParsed.films.length,
+            currentFilmPage: 1,
+            totalFilmPages: 1,
+            listsScraped: browserParsed.lists?.length ?? 0,
+            currentListPage: 1,
+            totalListPages: 1,
+            startedAtMs,
+          })
+        );
         return browserParsed;
       }
     }
   }
+
+  options?.onProgress?.(
+    buildScraperProgress({
+      phase: 'complete',
+      phaseLabel: 'Collection Crawl Complete',
+      message: result.notice,
+      filmsScraped: result.films.length,
+      currentFilmPage: 1,
+      totalFilmPages: 1,
+      listsScraped: result.lists?.length ?? 0,
+      currentListPage: 1,
+      totalListPages: 1,
+      startedAtMs,
+    })
+  );
 
   return result;
 }
@@ -1951,14 +3412,42 @@ export function applyScrapeResultToWorkspace(
   listsAddedOrUpdated: number;
   reviewsImported: number;
 } {
-  let nextArchive = syncProfileFilmsIntoArchive(result.films, archive);
-
   const listsToMerge: ScrapedListPayload[] =
     result.lists && result.lists.length > 0
       ? result.lists
       : result.list
       ? [result.list]
       : [];
+
+  // Combine top-level scraped films with any additional films inside curated lists
+  const combinedFilmsToSync: FilmEntry[] = [...result.films];
+  const seenSyncSlugs = new Set<string>(
+    result.films.map((f) =>
+      f.slug ? `slug::${f.slug.toLowerCase()}` : `${f.title.toLowerCase()}::${f.year}`
+    )
+  );
+  for (const l of listsToMerge) {
+    for (const lf of l.films || []) {
+      const k = lf.slug
+        ? `slug::${lf.slug.toLowerCase()}`
+        : `${lf.title.toLowerCase()}::${lf.year}`;
+      if (!seenSyncSlugs.has(k)) {
+        seenSyncSlugs.add(k);
+        combinedFilmsToSync.push(lf);
+      }
+    }
+  }
+
+  let nextArchive = syncProfileFilmsIntoArchive(combinedFilmsToSync, archive);
+
+  // Build slug -> filmId lookup on nextArchive.films so list entries always resolve to the exact FilmRecord ID
+  const slugToArchiveId = new Map<string, string>();
+  for (const rec of Object.values(nextArchive.films)) {
+    const recSlug = rec.letterboxdUri?.match(/\/film\/([^/"'?#]+)/i)?.[1];
+    if (recSlug) {
+      slugToArchiveId.set(recSlug.toLowerCase(), rec.id);
+    }
+  }
 
   let listsAddedOrUpdated = 0;
   const updatedLists: LetterboxdList[] = [...nextArchive.lists];
@@ -1979,7 +3468,9 @@ export function applyScrapeResultToWorkspace(
       `list-${slugifyTitle(scrapedList.name, 2026).replace(/-2026$/, '')}-${listsAddedOrUpdated}-${Date.now()}`;
 
     const listEntries: LetterboxdListEntry[] = listFilms.map((f, idx) => {
-      const filmId = makeFilmId(f.title, f.year);
+      const filmId =
+        (f.slug ? slugToArchiveId.get(f.slug.toLowerCase()) : undefined) ||
+        makeFilmId(f.title, f.year);
       const existingRec = nextArchive.films[filmId];
       if (existingRec && !existingRec.listIds.includes(listId)) {
         nextArchive.films[filmId] = {
@@ -2033,7 +3524,7 @@ export function applyScrapeResultToWorkspace(
 
   return {
     nextArchive,
-    filmsAddedOrUpdated: result.films.length,
+    filmsAddedOrUpdated: combinedFilmsToSync.length,
     listsAddedOrUpdated,
     reviewsImported,
   };
